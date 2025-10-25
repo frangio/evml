@@ -1,0 +1,8 @@
+[package]
+name = "evml"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.100"
+revm = "30.2.0"
