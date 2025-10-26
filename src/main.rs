@@ -6,18 +6,35 @@ use anyhow::{Error, Result};
 use revm::{bytecode::opcode, primitives::U256};
 use runner::run;
 
-enum Expr {
+enum Val {
     Const(U256),
 }
 
-fn compile(expr: &Expr) -> Result<Vec<u8>> {
-    match expr {
-        Expr::Const(c) => {
-            let mut code = vec![opcode::PUSH32];
+enum Expr {
+    Val(Val),
+}
+
+fn compile_val_onto(val: &Val, code: &mut Vec<u8>) -> Result<()> {
+    match val {
+        Val::Const(c) => {
+            code.push(opcode::PUSH32);
             code.extend_from_slice(&c.to_be_bytes::<32>());
-            Ok(code)
         }
     }
+
+    Ok(())
+}
+
+fn compile(expr: &Expr) -> Result<Vec<u8>> {
+    let mut code = vec![];
+
+    match expr {
+        Expr::Val(val) => {
+            compile_val_onto(val, &mut code)?;
+        }
+    }
+
+    Ok(code)
 }
 
 fn parse(source: &str) -> Result<Expr> {
