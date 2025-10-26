@@ -12,6 +12,7 @@ enum Val {
 
 enum Expr {
     Val(Val),
+    Op(u8, Vec<Val>),
 }
 
 fn compile_val_onto(val: &Val, code: &mut Vec<u8>) -> Result<()> {
@@ -32,6 +33,13 @@ fn compile(expr: &Expr) -> Result<Vec<u8>> {
         Expr::Val(val) => {
             compile_val_onto(val, &mut code)?;
         }
+
+        Expr::Op(op, args) => {
+            for arg in args.iter().rev() {
+                compile_val_onto(arg, &mut code)?;
+            }
+            code.push(*op);
+        }
     }
 
     Ok(code)
@@ -41,18 +49,37 @@ fn parse(source: &str) -> Result<Expr> {
     use chumsky::prelude::*;
 
     fn parser<'a>() -> impl Parser<'a, &'a str, Expr, extra::Err<Rich<'a, char>>> {
-        let val = text::int(10)
+        let val = text::digits(10)
+            .to_slice()
             .try_map(|digits: &str, span| {
                 digits
                     .parse::<U256>()
-                    .map(Val::Const)
                     .map_err(|e| Rich::custom(span, e.to_string()))
+                    .map(Val::Const)
             })
             .padded();
 
-        let expr = val.map(Expr::Val);
+        let expr_val = val.map(Expr::Val);
 
-        expr.then_ignore(end())
+        let expr_op = just('@')
+            .ignore_then(text::digits(16).to_slice())
+            .try_map(|digits: &str, span| {
+                u8::from_str_radix(digits, 16)
+                    .map_err(|e| Rich::custom(span, e.to_string()))
+            })
+            .then(
+                val.separated_by(just(','))
+                    .collect::<Vec<_>>()
+                    .delimited_by(just('('), just(')'))
+            )
+            .map(|(op, args)| Expr::Op(op, args));
+
+        let expr = choice((
+            expr_op,
+            expr_val,
+        ));
+
+        expr.padded().then_ignore(end())
     }
 
     let e = parser()
@@ -68,7 +95,8 @@ fn main() -> Result<()> {
     let source = read_to_string(script_path)?;
     let expr = parse(&source)?;
     let code = compile(&expr)?;
+    eprintln!("=== CODE ====\n{code:#02X?}");
     let stack = run(&code)?;
-    dbg!(stack);
+    eprintln!("=== STACK ===\n{stack:#?}");
     Ok(())
 }
