@@ -40,10 +40,19 @@ fn compile(expr: &Expr) -> Result<Vec<u8>> {
 fn parse(source: &str) -> Result<Expr> {
     use chumsky::prelude::*;
 
-    fn parser<'a>() -> impl Parser<'a, &'a str, Expr> {
-        text::int(10).try_map(|n: &'a str, _|
-            Ok(Expr::Val(Val::Const(n.parse().map_err(|_| EmptyErr::default())?)))
-        ).padded().then_ignore(end())
+    fn parser<'a>() -> impl Parser<'a, &'a str, Expr, extra::Err<Rich<'a, char>>> {
+        let val = text::int(10)
+            .try_map(|digits: &str, span| {
+                digits
+                    .parse::<U256>()
+                    .map(Val::Const)
+                    .map_err(|e| Rich::custom(span, e.to_string()))
+            })
+            .padded();
+
+        let expr = val.map(Expr::Val);
+
+        expr.then_ignore(end())
     }
 
     let e = parser()
