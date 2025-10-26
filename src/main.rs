@@ -21,8 +21,20 @@ fn compile(expr: &Expr) -> Result<Vec<u8>> {
 }
 
 fn parse(source: &str) -> Result<Expr> {
-    let c: U256 = source.trim().parse()?;
-    Ok(Expr::Const(c))
+    use chumsky::prelude::*;
+
+    fn parser<'a>() -> impl Parser<'a, &'a str, Expr> {
+        text::int(10).try_map(|n: &'a str, _|
+            Ok(Expr::Val(Val::Const(n.parse().map_err(|_| EmptyErr::default())?)))
+        ).padded().then_ignore(end())
+    }
+
+    let e = parser()
+        .parse(source)
+        .into_result()
+        .map_err(|es| Error::msg("parsing failed").context(es[0]))?;
+
+    Ok(e)
 }
 
 fn main() -> Result<()> {
