@@ -2,7 +2,7 @@ mod runner;
 
 use std::{env, fs::read_to_string};
 
-use anyhow::{Error, Result};
+use anyhow::{anyhow, Result};
 use revm::{bytecode::opcode, primitives::U256};
 use runner::run;
 
@@ -49,13 +49,13 @@ fn parse(source: &str) -> Result<Expr> {
     let e = parser()
         .parse(source)
         .into_result()
-        .map_err(|es| Error::msg("parsing failed").context(es[0]))?;
+        .map_err(|es| anyhow!(es[0].to_string()))?;
 
     Ok(e)
 }
 
 fn main() -> Result<()> {
-    let script_path = env::args().nth(1).ok_or(Error::msg("missing script argument"))?;
+    let script_path = env::args().nth(1).ok_or(anyhow!("missing script argument"))?;
     let source = read_to_string(script_path)?;
     let expr = parse(&source)?;
     let code = compile(&expr)?;
