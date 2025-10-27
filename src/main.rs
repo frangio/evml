@@ -1,7 +1,6 @@
 mod runner;
 
 use std::{env, fs::read_to_string};
-
 use anyhow::{anyhow, Result};
 use revm::{bytecode::opcode, primitives::U256};
 use runner::run;
@@ -95,8 +94,16 @@ fn main() -> Result<()> {
     let source = read_to_string(script_path)?;
     let expr = parse(&source)?;
     let code = compile(&expr)?;
-    eprintln!("=== CODE ====\n{code:#02X?}");
-    let stack = run(&code)?;
-    eprintln!("=== STACK ===\n{stack:#?}");
+    let (result, stack) = run(&code)?;
+
+    eprintln!("=== CODE ====");
+    for line in code.chunks(32) {
+        eprintln!("{}", line.iter().map(|b| format!("{b:02x?}")).collect::<String>());
+    }
+    eprintln!("=== RESULT ==");
+    eprintln!("{result:#?}");
+    eprintln!("=== STACK ===");
+    eprintln!("{stack:#?}");
+
     Ok(())
 }
