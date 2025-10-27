@@ -5,6 +5,8 @@ use anyhow::{anyhow, Result};
 use revm::{bytecode::opcode, primitives::U256};
 use runner::run;
 
+type Id = String;
+
 enum Val {
     Const(U256),
 }
@@ -14,6 +16,11 @@ enum Expr {
     Op(u8, Vec<Val>),
 }
 
+struct Block {
+    lets: Vec<(Id, Val)>,
+    tail: Expr,
+}
+
 fn compile_val_onto(val: &Val, code: &mut Vec<u8>) -> Result<()> {
     match val {
         Val::Const(c) => {
@@ -21,33 +28,38 @@ fn compile_val_onto(val: &Val, code: &mut Vec<u8>) -> Result<()> {
             code.extend_from_slice(&c.to_be_bytes::<32>());
         }
     }
-
     Ok(())
 }
 
-fn compile(expr: &Expr) -> Result<Vec<u8>> {
-    let mut code = vec![];
-
+fn compile_expr_onto(expr: &Expr, code: &mut Vec<u8>) -> Result<()> {
     match expr {
         Expr::Val(val) => {
-            compile_val_onto(val, &mut code)?;
+            compile_val_onto(val, code)?;
         }
 
         Expr::Op(op, args) => {
             for arg in args.iter().rev() {
-                compile_val_onto(arg, &mut code)?;
+                compile_val_onto(arg, code)?;
             }
             code.push(*op);
         }
     }
+    Ok(())
+}
 
+fn compile(block: &Block) -> Result<Vec<u8>> {
+    let mut code = vec![];
+    for let_ in &block.lets {
+        compile_val_onto(&let_.1, &mut code)?;
+    }
+    compile_expr_onto(&block.tail, &mut code)?;
     Ok(code)
 }
 
-fn parse(source: &str) -> Result<Expr> {
+fn parse(source: &str) -> Result<Block> {
     use chumsky::prelude::*;
 
-    fn parser<'a>() -> impl Parser<'a, &'a str, Expr, extra::Err<Rich<'a, char>>> {
+    fn parser<'a>() -> impl Parser<'a, &'a str, Block, extra::Err<Rich<'a, char>>> {
         let val = text::digits(10)
             .to_slice()
             .try_map(|digits: &str, span| {
@@ -78,22 +90,37 @@ fn parse(source: &str) -> Result<Expr> {
             expr_val,
         ));
 
-        expr.padded().then_ignore(end())
+        let block_let = text::keyword("let")
+            .ignore_then(text::whitespace())
+            .ignore_then(text::ident().map(ToOwned::to_owned))
+            .then_ignore(text::whitespace())
+            .then_ignore(just('='))
+            .then(val)
+            .then_ignore(just(';'));
+
+        let block = block_let
+            .padded()
+            .repeated()
+            .collect()
+            .then(expr)
+            .map(|(lets, tail)| Block { lets, tail });
+
+        block.padded().then_ignore(end())
     }
 
-    let e = parser()
+    let b = parser()
         .parse(source)
         .into_result()
         .map_err(|es| anyhow!(es[0].to_string()))?;
 
-    Ok(e)
+    Ok(b)
 }
 
 fn main() -> Result<()> {
     let script_path = env::args().nth(1).ok_or(anyhow!("missing script argument"))?;
     let source = read_to_string(script_path)?;
-    let expr = parse(&source)?;
-    let code = compile(&expr)?;
+    let block = parse(&source)?;
+    let code = compile(&block)?;
     let (result, stack) = run(&code)?;
 
     eprintln!("=== CODE ====");
