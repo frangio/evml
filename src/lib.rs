@@ -1,62 +1,59 @@
 mod runner;
 
-use std::{env, fs::read_to_string};
 use anyhow::{anyhow, Result};
 use revm::{bytecode::opcode, primitives::U256};
-use runner::run;
+pub use runner::run;
 
 type Id = String;
 
-enum Val {
+pub enum Val {
     Const(U256),
 }
 
-enum Expr {
+pub enum Expr {
     Val(Val),
     Op(u8, Vec<Val>),
 }
 
-struct Block {
+pub struct Block {
     lets: Vec<(Id, Val)>,
     tail: Expr,
 }
 
-fn compile_val_onto(val: &Val, code: &mut Vec<u8>) -> Result<()> {
+fn compile_val_onto(val: &Val, code: &mut Vec<u8>) {
     match val {
         Val::Const(c) => {
             code.push(opcode::PUSH32);
             code.extend_from_slice(&c.to_be_bytes::<32>());
         }
     }
-    Ok(())
 }
 
-fn compile_expr_onto(expr: &Expr, code: &mut Vec<u8>) -> Result<()> {
+fn compile_expr_onto(expr: &Expr, code: &mut Vec<u8>) {
     match expr {
         Expr::Val(val) => {
-            compile_val_onto(val, code)?;
+            compile_val_onto(val, code);
         }
 
         Expr::Op(op, args) => {
             for arg in args.iter().rev() {
-                compile_val_onto(arg, code)?;
+                compile_val_onto(arg, code);
             }
             code.push(*op);
         }
     }
-    Ok(())
 }
 
-fn compile(block: &Block) -> Result<Vec<u8>> {
+pub fn compile(block: &Block) -> Vec<u8> {
     let mut code = vec![];
     for let_ in &block.lets {
-        compile_val_onto(&let_.1, &mut code)?;
+        compile_val_onto(&let_.1, &mut code);
     }
-    compile_expr_onto(&block.tail, &mut code)?;
-    Ok(code)
+    compile_expr_onto(&block.tail, &mut code);
+    code
 }
 
-fn parse(source: &str) -> Result<Block> {
+pub fn parse(source: &str) -> Result<Block> {
     use chumsky::prelude::*;
 
     fn parser<'a>() -> impl Parser<'a, &'a str, Block, extra::Err<Rich<'a, char>>> {
@@ -114,23 +111,4 @@ fn parse(source: &str) -> Result<Block> {
         .map_err(|es| anyhow!(es[0].to_string()))?;
 
     Ok(b)
-}
-
-fn main() -> Result<()> {
-    let script_path = env::args().nth(1).ok_or(anyhow!("missing script argument"))?;
-    let source = read_to_string(script_path)?;
-    let block = parse(&source)?;
-    let code = compile(&block)?;
-    let (result, stack) = run(&code)?;
-
-    eprintln!("=== CODE ====");
-    for line in code.chunks(32) {
-        eprintln!("{}", line.iter().map(|b| format!("{b:02x?}")).collect::<String>());
-    }
-    eprintln!("=== RESULT ==");
-    eprintln!("{result:#?}");
-    eprintln!("=== STACK ===");
-    eprintln!("{stack:#?}");
-
-    Ok(())
 }

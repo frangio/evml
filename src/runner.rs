@@ -1,6 +1,4 @@
-use std::fmt::Debug;
-
-use anyhow::Result;
+use anyhow::{ensure, Result};
 use revm::context::tx::TxEnvBuilder;
 use revm::handler::instructions::EthInstructions;
 use revm::handler::{EthFrame, EthPrecompiles};
@@ -24,7 +22,7 @@ impl<CTX> Inspector<CTX> for StackInspector {
     }
 }
 
-pub fn run(code: &[u8]) -> Result<(impl Debug + use<>, Vec<U256>)> {
+pub fn run(code: &[u8]) -> Result<Vec<U256>> {
     let mut evm = Evm::new_with_inspector(
         Context::mainnet(),
         StackInspector(None),
@@ -39,5 +37,9 @@ pub fn run(code: &[u8]) -> Result<(impl Debug + use<>, Vec<U256>)> {
 
     evm.inspect_one_tx(tx)?;
 
-    Ok(evm.inspector.0.expect("execution did not stop"))
+    let (result, stack) = evm.inspector.0.expect("execution did not stop");
+
+    ensure!(result == InstructionResult::Stop, "{result:?}");
+
+    Ok(stack)
 }
