@@ -112,3 +112,30 @@ pub fn parse(source: &str) -> Result<Block> {
 
     Ok(b)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_const() {
+        let block = Block {
+            lets: vec![],
+            tail: Expr::Val(Val::Const(U256::from(42))),
+        };
+        let bytecode = compile(&block);
+        let stack = run(&bytecode).expect("execution failed");
+        assert_eq!(stack, vec![U256::from(42)]);
+    }
+
+    #[test]
+    fn test_op_div() {
+        let block = Block {
+            lets: vec![],
+            tail: Expr::Op(0x04, vec![Val::Const(U256::from(84)), Val::Const(U256::from(2))]),
+        };
+        let bytecode = compile(&block);
+        let stack = run(&bytecode).expect("execution failed");
+        assert_eq!(stack, vec![U256::from(42)]);
+    }
+}
