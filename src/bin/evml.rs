@@ -1,11 +1,12 @@
 use std::{env, fs::read_to_string};
 use anyhow::{anyhow, Result};
-use evml::{parse, compile, run};
+use evml::{compile, parse, resolve, run};
 
 fn main() -> Result<()> {
     let script_path = env::args().nth(1).ok_or(anyhow!("missing script argument"))?;
     let source = read_to_string(script_path)?;
     let block = parse(&source)?;
+    let block = resolve(&block)?;
     let code = compile(&block);
     let result = run(&code);
 

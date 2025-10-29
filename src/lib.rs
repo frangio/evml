@@ -1,35 +1,43 @@
 mod runner;
 
-use anyhow::{anyhow, Result};
+use std::collections::HashMap;
+
+use anyhow::{anyhow, Context, Result};
 use revm::{bytecode::opcode, primitives::U256};
 pub use runner::run;
 
-type Id = String;
+#[derive(Clone, Copy)]
+pub struct Id(usize);
 
-pub enum Val {
+#[derive(Clone)]
+pub enum Val<Id> {
     Const(U256),
+    Var(Id),
 }
 
-pub enum Expr {
-    Val(Val),
-    Op(u8, Vec<Val>),
+#[derive(Clone)]
+pub enum Expr<Id> {
+    Val(Val<Id>),
+    Op(u8, Vec<Val<Id>>),
 }
 
-pub struct Block {
-    lets: Vec<(Id, Val)>,
-    tail: Expr,
+pub struct Block<Id> {
+    lets: Vec<(Id, Val<Id>)>,
+    tail: Expr<Id>,
 }
 
-fn compile_val_onto(val: &Val, code: &mut Vec<u8>) {
+fn compile_val_onto(val: &Val<Id>, code: &mut Vec<u8>) {
     match val {
         Val::Const(c) => {
             code.push(opcode::PUSH32);
             code.extend_from_slice(&c.to_be_bytes::<32>());
         }
+
+        Val::Var(_) => todo!(),
     }
 }
 
-fn compile_expr_onto(expr: &Expr, code: &mut Vec<u8>) {
+fn compile_expr_onto(expr: &Expr<Id>, code: &mut Vec<u8>) {
     match expr {
         Expr::Val(val) => {
             compile_val_onto(val, code);
@@ -44,7 +52,7 @@ fn compile_expr_onto(expr: &Expr, code: &mut Vec<u8>) {
     }
 }
 
-pub fn compile(block: &Block) -> Vec<u8> {
+pub fn compile(block: &Block<Id>) -> Vec<u8> {
     let mut code = vec![];
     for let_ in &block.lets {
         compile_val_onto(&let_.1, &mut code);
@@ -53,10 +61,51 @@ pub fn compile(block: &Block) -> Vec<u8> {
     code
 }
 
-pub fn parse(source: &str) -> Result<Block> {
+fn resolve_val(val: &Val<String>, env: &HashMap<String, Id>) -> Result<Val<Id>> {
+    Ok(match val {
+        Val::Const(c) => Val::Const(*c),
+        Val::Var(x) => {
+            Val::Var(*env.get(x).with_context(|| format!("unbound variable {x}"))?)
+        }
+    })
+}
+
+fn resolve_expr(expr: &Expr<String>, env: &HashMap<String, Id>) -> Result<Expr<Id>> {
+    Ok(match expr {
+        Expr::Val(val) => Expr::Val(resolve_val(val, env)?),
+        Expr::Op(op, vals) => {
+            let vals = vals.iter().map(|val| resolve_val(val, env)).collect::<Result<_>>()?;
+            Expr::Op(*op, vals)
+        }
+    })
+}
+
+pub fn resolve(block: &Block<String>) -> Result<Block<Id>> {
+    let mut next_id = 0;
+    let mut env: HashMap<String, Id> = HashMap::new();
+
+    let mut lets = Vec::with_capacity(block.lets.len());
+
+    for (x, val) in &block.lets {
+        let val = resolve_val(val, &env)?;
+
+        let y = Id(next_id);
+        next_id += 1;
+
+        env.insert(x.clone(), y);
+
+        lets.push((y, val));
+    }
+
+    let tail = resolve_expr(&block.tail, &env)?;
+
+    Ok(Block { lets, tail })
+}
+
+pub fn parse(source: &str) -> Result<Block<String>> {
     use chumsky::prelude::*;
 
-    fn parser<'a>() -> impl Parser<'a, &'a str, Block, extra::Err<Rich<'a, char>>> {
+    fn parser<'a>() -> impl Parser<'a, &'a str, Block<String>, extra::Err<Rich<'a, char>>> {
         let val = text::digits(10)
             .to_slice()
             .try_map(|digits: &str, span| {
