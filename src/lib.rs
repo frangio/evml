@@ -6,7 +6,7 @@ use anyhow::{anyhow, Context, Result};
 use revm::{bytecode::opcode, primitives::U256};
 pub use runner::run;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Id(usize);
 
 #[derive(Clone)]
@@ -26,26 +26,53 @@ pub struct Block<Id> {
     tail: Expr<Id>,
 }
 
-fn compile_val_onto(val: &Val<Id>, code: &mut Vec<u8>) {
+struct Stack(Vec<Option<Id>>);
+
+impl Stack {
+    fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    fn push(&mut self) {
+        self.0.push(None);
+    }
+
+    fn rename(&mut self, x: Id) {
+        let last = self.0.last_mut().expect("empty stack");
+        *last = Some(x);
+    }
+
+    fn find(&self, x: Id) -> usize {
+        let pos = self.0.iter().rposition(|&y| y == Some(x)).expect("unknown variable");
+        self.0.len() - 1 - pos
+    }
+}
+
+fn compile_val_onto(val: &Val<Id>, stack: &mut Stack, code: &mut Vec<u8>) {
     match val {
         Val::Const(c) => {
             code.push(opcode::PUSH32);
             code.extend_from_slice(&c.to_be_bytes::<32>());
+            stack.push();
         }
 
-        Val::Var(_) => todo!(),
+        Val::Var(x) => {
+            let depth = stack.find(*x);
+            code.push(opcode::DUP1 + u8::try_from(depth).expect("stack too deep"));
+            stack.push();
+        }
     }
 }
 
-fn compile_expr_onto(expr: &Expr<Id>, code: &mut Vec<u8>) {
+fn compile_expr_onto(expr: &Expr<Id>, stack: &mut Stack, code: &mut Vec<u8>) {
     match expr {
         Expr::Val(val) => {
-            compile_val_onto(val, code);
+            compile_val_onto(val, stack, code);
         }
 
         Expr::Op(op, args) => {
             for arg in args.iter().rev() {
-                compile_val_onto(arg, code);
+                compile_val_onto(arg, stack, code);
             }
             code.push(*op);
         }
@@ -53,11 +80,13 @@ fn compile_expr_onto(expr: &Expr<Id>, code: &mut Vec<u8>) {
 }
 
 pub fn compile(block: &Block<Id>) -> Vec<u8> {
+    let mut stack = Stack::new();
     let mut code = vec![];
-    for let_ in &block.lets {
-        compile_val_onto(&let_.1, &mut code);
+    for (x, v) in &block.lets {
+        compile_val_onto(v, &mut stack, &mut code);
+        stack.rename(*x);
     }
-    compile_expr_onto(&block.tail, &mut code);
+    compile_expr_onto(&block.tail, &mut stack, &mut code);
     code
 }
 
@@ -106,15 +135,22 @@ pub fn parse(source: &str) -> Result<Block<String>> {
     use chumsky::prelude::*;
 
     fn parser<'a>() -> impl Parser<'a, &'a str, Block<String>, extra::Err<Rich<'a, char>>> {
-        let val = text::digits(10)
+        let val_const = text::digits(10)
             .to_slice()
             .try_map(|digits: &str, span| {
                 digits
                     .parse::<U256>()
                     .map_err(|e| Rich::custom(span, e.to_string()))
                     .map(Val::Const)
-            })
-            .padded();
+            });
+
+        let val_var = text::ident()
+            .map(|x: &str| Val::Var(x.to_owned()));
+
+        let val = choice((
+            val_const,
+            val_var,
+        )).padded();
 
         let expr_val = val.map(Expr::Val);
 
@@ -186,5 +222,18 @@ mod tests {
         let bytecode = compile(&block);
         let stack = run(&bytecode).expect("execution failed");
         assert_eq!(stack, vec![U256::from(42)]);
+    }
+
+    #[test]
+    fn test_var() {
+        let block = Block {
+            lets: vec![
+                (Id(0), Val::Const(U256::from(2))),
+            ],
+            tail: Expr::Op(0x04, vec![Val::Const(U256::from(84)), Val::Var(Id(0))]),
+        };
+        let bytecode = compile(&block);
+        let stack = run(&bytecode).expect("execution failed");
+        assert_eq!(stack, vec![U256::from(2), U256::from(42)]);
     }
 }
