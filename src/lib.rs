@@ -22,7 +22,7 @@ pub enum Expr<Id> {
 }
 
 pub struct Block<Id> {
-    lets: Vec<(Id, Val<Id>)>,
+    lets: Vec<(Id, Expr<Id>)>,
     tail: Expr<Id>,
 }
 
@@ -33,16 +33,19 @@ impl Stack {
         Self(Vec::new())
     }
 
-    fn push(&mut self) {
-        self.0.push(None);
+    fn len(&self) -> usize {
+        self.0.len()
     }
 
-    fn rename(&mut self, x: Id) {
-        let last = self.0.last_mut().expect("empty stack");
-        *last = Some(x);
+    fn truncate(&mut self, size: usize) {
+        self.0.truncate(size);
     }
 
-    fn find(&self, x: Id) -> usize {
+    fn push(&mut self, x: Option<Id>) {
+        self.0.push(x);
+    }
+
+    fn position(&self, x: Id) -> usize {
         let pos = self.0.iter().rposition(|&y| y == Some(x)).expect("unknown variable");
         self.0.len() - 1 - pos
     }
@@ -53,13 +56,11 @@ fn compile_val_onto(val: &Val<Id>, stack: &mut Stack, code: &mut Vec<u8>) {
         Val::Const(c) => {
             code.push(opcode::PUSH32);
             code.extend_from_slice(&c.to_be_bytes::<32>());
-            stack.push();
         }
 
         Val::Var(x) => {
-            let depth = stack.find(*x);
+            let depth = stack.position(*x);
             code.push(opcode::DUP1 + u8::try_from(depth).expect("stack too deep"));
-            stack.push();
         }
     }
 }
@@ -71,9 +72,12 @@ fn compile_expr_onto(expr: &Expr<Id>, stack: &mut Stack, code: &mut Vec<u8>) {
         }
 
         Expr::Op(op, args) => {
+            let size = stack.len();
             for arg in args.iter().rev() {
                 compile_val_onto(arg, stack, code);
+                stack.push(None);
             }
+            stack.truncate(size);
             code.push(*op);
         }
     }
@@ -83,8 +87,8 @@ pub fn compile(block: &Block<Id>) -> Vec<u8> {
     let mut stack = Stack::new();
     let mut code = vec![];
     for (x, v) in &block.lets {
-        compile_val_onto(v, &mut stack, &mut code);
-        stack.rename(*x);
+        compile_expr_onto(v, &mut stack, &mut code);
+        stack.push(Some(*x));
     }
     compile_expr_onto(&block.tail, &mut stack, &mut code);
     code
@@ -115,15 +119,15 @@ pub fn resolve(block: &Block<String>) -> Result<Block<Id>> {
 
     let mut lets = Vec::with_capacity(block.lets.len());
 
-    for (x, val) in &block.lets {
-        let val = resolve_val(val, &env)?;
+    for (x, expr) in &block.lets {
+        let expr = resolve_expr(expr, &env)?;
 
         let y = Id(next_id);
         next_id += 1;
 
         env.insert(x.clone(), y);
 
-        lets.push((y, val));
+        lets.push((y, expr));
     }
 
     let tail = resolve_expr(&block.tail, &env)?;
@@ -170,14 +174,14 @@ pub fn parse(source: &str) -> Result<Block<String>> {
         let expr = choice((
             expr_op,
             expr_val,
-        ));
+        )).padded();
 
         let block_let = text::keyword("let")
             .ignore_then(text::whitespace())
             .ignore_then(text::ident().map(ToOwned::to_owned))
             .then_ignore(text::whitespace())
             .then_ignore(just('='))
-            .then(val)
+            .then(expr)
             .then_ignore(just(';'));
 
         let block = block_let
@@ -225,15 +229,28 @@ mod tests {
     }
 
     #[test]
-    fn test_var() {
+    fn test_let_val() {
         let block = Block {
             lets: vec![
-                (Id(0), Val::Const(U256::from(2))),
+                (Id(0), Expr::Val(Val::Const(U256::from(2)))),
             ],
             tail: Expr::Op(0x04, vec![Val::Const(U256::from(84)), Val::Var(Id(0))]),
         };
         let bytecode = compile(&block);
         let stack = run(&bytecode).expect("execution failed");
         assert_eq!(stack, vec![U256::from(2), U256::from(42)]);
+    }
+
+    #[test]
+    fn test_let_op() {
+        let block = Block {
+            lets: vec![
+                (Id(0), Expr::Op(0x04, vec![Val::Const(U256::from(84)), Val::Const(U256::from(2))])),
+            ],
+            tail: Expr::Val(Val::Var(Id(0))),
+        };
+        let bytecode = compile(&block);
+        let stack = run(&bytecode).expect("execution failed");
+        assert_eq!(stack, vec![U256::from(42); 2]);
     }
 }
