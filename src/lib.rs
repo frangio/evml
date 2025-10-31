@@ -6,16 +6,14 @@ use anyhow::{anyhow, Context, Result};
 use revm::{bytecode::opcode, primitives::U256};
 pub use runner::run;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Id(usize);
 
-#[derive(Clone)]
 pub enum Val<Id> {
     Const(U256),
     Var(Id),
 }
 
-#[derive(Clone)]
 pub enum Expr<Id> {
     Val(Val<Id>),
     Op(u8, Vec<Val<Id>>),
@@ -26,7 +24,11 @@ pub struct Block<Id> {
     tail: Expr<Id>,
 }
 
-struct Stack(Vec<Option<Id>>);
+struct Stack(Vec<Option<(Id, usize)>>);
+struct StackEntry<'a> {
+    stack: &'a mut Stack,
+    index: usize,
+}
 
 impl Stack {
     fn new() -> Self {
@@ -37,18 +39,55 @@ impl Stack {
         self.0.len()
     }
 
-    fn truncate(&mut self, size: usize) {
-        self.0.truncate(size);
+    fn popn(&mut self, count: usize) {
+        let mut removed = self.0.drain(self.0.len() - count..);
+        assert!(removed.all(|x| x.is_none_or(|x| x.1 == 0)));
     }
 
-    fn push(&mut self, x: Option<Id>) {
+    fn push(&mut self, x: Option<(Id, usize)>) {
         self.0.push(x);
     }
 
-    fn position(&self, x: Id) -> usize {
-        let pos = self.0.iter().rposition(|&y| y == Some(x)).expect("unknown variable");
-        self.0.len() - 1 - pos
+    fn swap(&mut self, depth: usize) {
+        let top = self.0.len() - 1;
+        let index = top - depth;
+        self.0.swap(index, top);
     }
+
+    fn entry(&mut self, x: Id) -> StackEntry<'_> {
+        let index = self.0.iter()
+            .rposition(|y| y.as_ref().is_some_and(|y| y.0 == x))
+            .expect("unknown variable");
+        StackEntry { stack: self, index }
+    }
+}
+
+impl StackEntry<'_> {
+    fn occurs(&mut self) -> &mut usize {
+        let item = &mut self.stack.0[self.index];
+        let item = item.as_mut().expect("stack item is temporary");
+        &mut item.1
+    }
+
+    fn depth(&self) -> usize {
+        self.stack.0.len() - 1 - self.index
+    }
+
+    fn swap(&mut self) {
+        let top = self.stack.0.len() - 1;
+        self.stack.0.swap(self.index, top);
+    }
+}
+
+fn opcode_swap(depth: usize) -> u8 {
+    assert!(depth > 0, "can't swap top of stack");
+    assert!(depth <= 16, "stack too deep");
+    opcode::SWAP1 + (depth - 1) as u8
+}
+
+fn opcode_dup(depth: usize) -> u8 {
+    assert!(depth < 16, "stack too deep");
+    opcode::DUP1 + depth as u8
 }
 
 fn compile_val_onto(val: &Val<Id>, stack: &mut Stack, code: &mut Vec<u8>) {
@@ -59,8 +98,19 @@ fn compile_val_onto(val: &Val<Id>, stack: &mut Stack, code: &mut Vec<u8>) {
         }
 
         Val::Var(x) => {
-            let depth = stack.position(*x);
-            code.push(opcode::DUP1 + u8::try_from(depth).expect("stack too deep"));
+            let mut entry = stack.entry(*x);
+            let depth = entry.depth();
+            let occurs = entry.occurs();
+            *occurs -= 1;
+            if *occurs > 0 {
+                code.push(opcode_dup(depth));
+            } else {
+                if depth > 0 {
+                    code.push(opcode_swap(depth));
+                    entry.swap();
+                }
+                stack.popn(1);
+            }
         }
     }
 }
@@ -72,23 +122,76 @@ fn compile_expr_onto(expr: &Expr<Id>, stack: &mut Stack, code: &mut Vec<u8>) {
         }
 
         Expr::Op(op, args) => {
-            let size = stack.len();
-            for arg in args.iter().rev() {
+            let mut seen_counts = HashMap::with_capacity(args.len());
+            let stack_delta = args.iter().filter(|v| {
+                match v {
+                    Val::Const(_) => true,
+                    Val::Var(x) => {
+                        let seen_count = seen_counts.entry(*x).or_insert(0);
+                        *seen_count += 1;
+                        *stack.entry(*x).occurs() > *seen_count
+                    }
+                }
+            }).count();
+            let target_stack_len = stack.len() + stack_delta;
+
+            for (i, arg) in args.iter().enumerate().rev() {
                 compile_val_onto(arg, stack, code);
                 stack.push(None);
+                let rem_delta = target_stack_len - stack.len();
+                let offset = i - rem_delta;
+                if offset > 0 {
+                    code.push(opcode_swap(offset));
+                    stack.swap(offset);
+                }
             }
-            stack.truncate(size);
+
             code.push(*op);
+            stack.popn(args.len());
         }
     }
 }
 
+fn count_occurs_val(val: &Val<Id>, counts: &mut HashMap<Id, usize>) {
+    if let Val::Var(x) = val {
+        let x_count = counts.get_mut(x).expect("variable not found");
+        *x_count += 1;
+    }
+}
+
+fn count_occurs_expr(expr: &Expr<Id>, counts: &mut HashMap<Id, usize>) {
+    match expr {
+        Expr::Val(val) => count_occurs_val(val, counts),
+        Expr::Op(_, args) => {
+            for arg in args {
+                count_occurs_val(arg, counts);
+            }
+        }
+    }
+}
+
+fn count_occurs(block: &Block<Id>) -> HashMap<Id, usize> {
+    let mut counts = HashMap::new();
+    for (x, expr) in &block.lets {
+        counts.insert(*x, 0);
+        count_occurs_expr(expr, &mut counts);
+    }
+    count_occurs_expr(&block.tail, &mut counts);
+    counts
+}
+
 pub fn compile(block: &Block<Id>) -> Vec<u8> {
+    let counts = count_occurs(block);
     let mut stack = Stack::new();
     let mut code = vec![];
     for (x, v) in &block.lets {
         compile_expr_onto(v, &mut stack, &mut code);
-        stack.push(Some(*x));
+        let x_count = *counts.get(x).expect("variable not found");
+        if x_count > 0 {
+            stack.push(Some((*x, x_count)));
+        } else {
+            code.push(opcode::POP);
+        }
     }
     compile_expr_onto(&block.tail, &mut stack, &mut code);
     code
@@ -238,7 +341,7 @@ mod tests {
         };
         let bytecode = compile(&block);
         let stack = run(&bytecode).expect("execution failed");
-        assert_eq!(stack, vec![U256::from(2), U256::from(42)]);
+        assert_eq!(stack, vec![U256::from(42)]);
     }
 
     #[test]
@@ -251,6 +354,32 @@ mod tests {
         };
         let bytecode = compile(&block);
         let stack = run(&bytecode).expect("execution failed");
-        assert_eq!(stack, vec![U256::from(42); 2]);
+        assert_eq!(stack, vec![U256::from(42)]);
+    }
+
+    #[test]
+    fn test_let_op_reuse() {
+        let block = Block {
+            lets: vec![
+                (Id(0), Expr::Val(Val::Const(U256::from(42)))),
+            ],
+            tail: Expr::Op(0x04, vec![Val::Var(Id(0)), Val::Var(Id(0))]),
+        };
+        let bytecode = compile(&block);
+        let stack = run(&bytecode).expect("execution failed");
+        assert_eq!(stack, vec![U256::from(1)]);
+    }
+
+    #[test]
+    fn test_let_unused() {
+        let block = Block {
+            lets: vec![
+                (Id(0), Expr::Val(Val::Const(U256::from(100)))),
+            ],
+            tail: Expr::Val(Val::Const(U256::from(42))),
+        };
+        let bytecode = compile(&block);
+        let stack = run(&bytecode).expect("execution failed");
+        assert_eq!(stack, vec![U256::from(42)]);
     }
 }
