@@ -283,10 +283,10 @@ pub fn parse(source: &str) -> Result<Block<String>> {
         let expr_val = val.map(Expr::Val);
 
         let expr_op = just('@')
-            .ignore_then(text::digits(16).to_slice())
-            .try_map(|digits: &str, span| {
-                u8::from_str_radix(digits, 16)
-                    .map_err(|e| Rich::custom(span, e.to_string()))
+            .ignore_then(text::ident())
+            .try_map(|opcode_name: &str, span| {
+                opcodes::lookup(opcode_name)
+                    .ok_or_else(|| Rich::custom(span, format!("unknown opcode {opcode_name}")))
             })
             .then(
                 val.separated_by(just(','))
