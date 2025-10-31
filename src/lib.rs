@@ -2,7 +2,7 @@ mod runner;
 
 use std::collections::HashMap;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, ensure, Context, Result};
 use revm::{bytecode::opcode, primitives::U256};
 pub use runner::run;
 
@@ -184,8 +184,8 @@ pub fn compile(block: &Block<Id>) -> Vec<u8> {
     let counts = count_occurs(block);
     let mut stack = Stack::new();
     let mut code = vec![];
-    for (x, v) in &block.lets {
-        compile_expr_onto(v, &mut stack, &mut code);
+    for (x, e) in &block.lets {
+        compile_expr_onto(e, &mut stack, &mut code);
         let x_count = *counts.get(x).expect("variable not found");
         if x_count > 0 {
             stack.push(Some((*x, x_count)));
@@ -195,6 +195,34 @@ pub fn compile(block: &Block<Id>) -> Vec<u8> {
     }
     compile_expr_onto(&block.tail, &mut stack, &mut code);
     code
+}
+
+fn type_check_expr(expr: &Expr<Id>) -> Result<usize> {
+    match expr {
+        Expr::Val(_) => Ok(1),
+        Expr::Op(op, args) => {
+            match *op {
+                0x04 => {
+                    ensure!(args.len() == 2, "DIV expects 2 args");
+                    Ok(1)
+                }
+                0x50 => {
+                    ensure!(args.len() == 1, "POP expects 1 arg");
+                    Ok(0)
+                }
+                _ => Err(anyhow!("unknown opcode {op:#04x?}")),
+            }
+        }
+    }
+}
+
+pub fn type_check(block: &Block<Id>) -> Result<()> {
+    for (_, e) in &block.lets {
+        let outputs = type_check_expr(e)?;
+        ensure!(outputs == 1, "void operation can't be assigned");
+    }
+    type_check_expr(&block.tail)?;
+    Ok(())
 }
 
 fn resolve_val(val: &Val<String>, env: &HashMap<String, Id>) -> Result<Val<Id>> {
@@ -381,5 +409,34 @@ mod tests {
         let bytecode = compile(&block);
         let stack = run(&bytecode).expect("execution failed");
         assert_eq!(stack, vec![U256::from(42)]);
+    }
+
+    #[test]
+    fn test_type_check_div_ok() {
+        let block = Block {
+            lets: vec![],
+            tail: Expr::Op(0x04, vec![Val::Const(U256::from(84)), Val::Const(U256::from(2))]),
+        };
+        assert!(type_check(&block).is_ok());
+    }
+
+    #[test]
+    fn test_type_check_div_err() {
+        let block = Block {
+            lets: vec![],
+            tail: Expr::Op(0x04, vec![Val::Const(U256::from(84))]),
+        };
+        assert!(type_check(&block).is_err());
+    }
+
+    #[test]
+    fn test_type_check_pop_err() {
+        let block = Block {
+            lets: vec![
+                (Id(0), Expr::Op(0x50, vec![Val::Const(U256::from(42))])),
+            ],
+            tail: Expr::Val(Val::Const(U256::from(0))),
+        };
+        assert!(type_check(&block).is_err());
     }
 }
