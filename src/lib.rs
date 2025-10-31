@@ -1,8 +1,9 @@
 mod runner;
+mod opcodes;
 
 use std::collections::HashMap;
 
-use anyhow::{anyhow, ensure, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use revm::{bytecode::opcode, primitives::U256};
 pub use runner::run;
 
@@ -201,17 +202,9 @@ fn type_check_expr(expr: &Expr<Id>) -> Result<usize> {
     match expr {
         Expr::Val(_) => Ok(1),
         Expr::Op(op, args) => {
-            match *op {
-                0x04 => {
-                    ensure!(args.len() == 2, "DIV expects 2 args");
-                    Ok(1)
-                }
-                0x50 => {
-                    ensure!(args.len() == 1, "POP expects 1 arg");
-                    Ok(0)
-                }
-                _ => Err(anyhow!("unknown opcode {op:#04x?}")),
-            }
+            let Some(info) = opcodes::info(*op) else { bail!("unknown opcode {op:#04x?}") };
+            ensure!(args.len() == info.inputs);
+            Ok(info.outputs)
         }
     }
 }
