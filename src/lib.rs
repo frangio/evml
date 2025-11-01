@@ -21,7 +21,7 @@ pub enum Expr<Id> {
 }
 
 pub struct Block<Id> {
-    lets: Vec<(Id, Expr<Id>)>,
+    lets: Vec<(Option<Id>, Expr<Id>)>,
     tail: Expr<Id>,
 }
 
@@ -174,7 +174,9 @@ fn count_occurs_expr(expr: &Expr<Id>, counts: &mut HashMap<Id, usize>) {
 fn count_occurs(block: &Block<Id>) -> HashMap<Id, usize> {
     let mut counts = HashMap::new();
     for (x, expr) in &block.lets {
-        counts.insert(*x, 0);
+        if let Some(x) = x {
+            counts.insert(*x, 0);
+        }
         count_occurs_expr(expr, &mut counts);
     }
     count_occurs_expr(&block.tail, &mut counts);
@@ -187,11 +189,13 @@ pub fn compile(block: &Block<Id>) -> Vec<u8> {
     let mut code = vec![];
     for (x, e) in &block.lets {
         compile_expr_onto(e, &mut stack, &mut code);
-        let x_count = *counts.get(x).expect("variable not found");
-        if x_count > 0 {
-            stack.push(Some((*x, x_count)));
-        } else {
-            code.push(opcode::POP);
+        if let Some(x) = x {
+            let x_count = *counts.get(x).expect("variable not found");
+            if x_count > 0 {
+                stack.push(Some((*x, x_count)));
+            } else {
+                code.push(opcode::POP);
+            }
         }
     }
     compile_expr_onto(&block.tail, &mut stack, &mut code);
@@ -210,9 +214,9 @@ fn type_check_expr(expr: &Expr<Id>) -> Result<usize> {
 }
 
 pub fn type_check(block: &Block<Id>) -> Result<()> {
-    for (_, e) in &block.lets {
+    for (x, e) in &block.lets {
         let outputs = type_check_expr(e)?;
-        ensure!(outputs == 1, "void operation can't be assigned");
+        ensure!(outputs == x.iter().count(), "void operation can't be assigned");
     }
     type_check_expr(&block.tail)?;
     Ok(())
@@ -246,12 +250,14 @@ pub fn resolve(block: &Block<String>) -> Result<Block<Id>> {
     for (x, expr) in &block.lets {
         let expr = resolve_expr(expr, &env)?;
 
-        let y = Id(next_id);
-        next_id += 1;
-
-        env.insert(x.clone(), y);
-
-        lets.push((y, expr));
+        if let Some(x) = x {
+            let y = Id(next_id);
+            next_id += 1;
+            env.insert(x.clone(), y);
+            lets.push((Some(y), expr));
+        } else {
+            lets.push((None, expr));
+        }
     }
 
     let tail = resolve_expr(&block.tail, &env)?;
@@ -302,7 +308,12 @@ pub fn parse(source: &str) -> Result<Block<String>> {
 
         let block_let = text::keyword("let")
             .ignore_then(text::whitespace())
-            .ignore_then(text::ident().map(ToOwned::to_owned))
+            .ignore_then(
+                choice((
+                    just('_').to(None),
+                    text::ident().map(|id: &str| Some(id.to_owned())),
+                ))
+            )
             .then_ignore(text::whitespace())
             .then_ignore(just('='))
             .then(expr)
@@ -356,7 +367,7 @@ mod tests {
     fn test_let_val() {
         let block = Block {
             lets: vec![
-                (Id(0), Expr::Val(Val::Const(U256::from(2)))),
+                (Some(Id(0)), Expr::Val(Val::Const(U256::from(2)))),
             ],
             tail: Expr::Op(0x04, vec![Val::Const(U256::from(84)), Val::Var(Id(0))]),
         };
@@ -369,7 +380,7 @@ mod tests {
     fn test_let_op() {
         let block = Block {
             lets: vec![
-                (Id(0), Expr::Op(0x04, vec![Val::Const(U256::from(84)), Val::Const(U256::from(2))])),
+                (Some(Id(0)), Expr::Op(0x04, vec![Val::Const(U256::from(84)), Val::Const(U256::from(2))])),
             ],
             tail: Expr::Val(Val::Var(Id(0))),
         };
@@ -382,7 +393,7 @@ mod tests {
     fn test_let_op_reuse() {
         let block = Block {
             lets: vec![
-                (Id(0), Expr::Val(Val::Const(U256::from(42)))),
+                (Some(Id(0)), Expr::Val(Val::Const(U256::from(42)))),
             ],
             tail: Expr::Op(0x04, vec![Val::Var(Id(0)), Val::Var(Id(0))]),
         };
@@ -395,7 +406,7 @@ mod tests {
     fn test_let_unused() {
         let block = Block {
             lets: vec![
-                (Id(0), Expr::Val(Val::Const(U256::from(100)))),
+                (Some(Id(0)), Expr::Val(Val::Const(U256::from(100)))),
             ],
             tail: Expr::Val(Val::Const(U256::from(42))),
         };
@@ -426,7 +437,7 @@ mod tests {
     fn test_type_check_pop_err() {
         let block = Block {
             lets: vec![
-                (Id(0), Expr::Op(0x50, vec![Val::Const(U256::from(42))])),
+                (Some(Id(0)), Expr::Op(0x50, vec![Val::Const(U256::from(42))])),
             ],
             tail: Expr::Val(Val::Const(U256::from(0))),
         };
