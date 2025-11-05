@@ -1,7 +1,7 @@
 mod runner;
 mod opcodes;
 
-use std::{collections::HashMap, num::NonZeroUsize};
+use std::{collections::HashMap, iter::zip, num::NonZeroUsize};
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use revm::{bytecode::opcode, primitives::U256};
@@ -24,6 +24,7 @@ impl IdGen {
     }
 }
 
+#[derive(PartialEq, Eq)]
 pub enum Val<Id> {
     Const(U256),
     Var(Id),
@@ -39,7 +40,7 @@ pub struct Block<Id> {
     tail: Expr<Id>,
 }
 
-struct Stack(Vec<Option<(Id, usize)>>);
+struct Stack(Vec<Option<Id>>);
 struct StackEntry<'a> {
     stack: &'a mut Stack,
     index: usize,
@@ -55,11 +56,10 @@ impl Stack {
     }
 
     fn popn(&mut self, count: usize) {
-        let mut removed = self.0.drain(self.0.len() - count..);
-        assert!(removed.all(|x| x.is_none_or(|x| x.1 == 0)));
+        self.0.truncate(self.0.len() - count);
     }
 
-    fn push(&mut self, x: Option<(Id, usize)>) {
+    fn push(&mut self, x: Option<Id>) {
         self.0.push(x);
     }
 
@@ -71,17 +71,15 @@ impl Stack {
 
     fn entry(&mut self, x: Id) -> StackEntry<'_> {
         let index = self.0.iter()
-            .rposition(|y| y.as_ref().is_some_and(|y| y.0 == x))
+            .rposition(|y| y.as_ref().is_some_and(|&y| y == x))
             .expect("unknown variable");
         StackEntry { stack: self, index }
     }
 }
 
 impl StackEntry<'_> {
-    fn occurs(&mut self) -> &mut usize {
-        let item = &mut self.stack.0[self.index];
-        let item = item.as_mut().expect("stack item is temporary");
-        &mut item.1
+    fn var(&self) -> Id {
+        self.stack.0[self.index].expect("stack item is temporary")
     }
 
     fn depth(&self) -> usize {
@@ -105,7 +103,12 @@ fn opcode_dup(depth: usize) -> u8 {
     opcode::DUP1 + depth as u8
 }
 
-fn compile_val_onto(val: &Val<Id>, stack: &mut Stack, code: &mut Vec<u8>) {
+fn compile_val_onto(
+    val: &Val<Id>,
+    stack: &mut Stack,
+    should_swap: impl Fn(&StackEntry) -> bool,
+    code: &mut Vec<u8>,
+) {
     match val {
         Val::Const(c) => {
             code.push(opcode::PUSH32);
@@ -115,9 +118,7 @@ fn compile_val_onto(val: &Val<Id>, stack: &mut Stack, code: &mut Vec<u8>) {
         Val::Var(x) => {
             let mut entry = stack.entry(*x);
             let depth = entry.depth();
-            let occurs = entry.occurs();
-            *occurs -= 1;
-            if *occurs > 0 {
+            if !should_swap(&entry) {
                 code.push(opcode_dup(depth));
             } else {
                 if depth > 0 {
@@ -130,28 +131,34 @@ fn compile_val_onto(val: &Val<Id>, stack: &mut Stack, code: &mut Vec<u8>) {
     }
 }
 
-fn compile_expr_onto(expr: &Expr<Id>, stack: &mut Stack, code: &mut Vec<u8>) {
+fn compile_expr_onto(
+    expr: &Expr<Id>,
+    stack: &mut Stack,
+    is_last_use: impl Fn(Id) -> bool,
+    code: &mut Vec<u8>,
+) {
     match expr {
         Expr::Val(val) => {
-            compile_val_onto(val, stack, code);
+            compile_val_onto(val, stack, |e| is_last_use(e.var()), code);
         }
 
         Expr::Op(op, args) => {
-            let mut seen_counts = HashMap::with_capacity(args.len());
-            let stack_delta = args.iter().filter(|v| {
+            let should_swap  = |x, i| {
+                is_last_use(x) && !args[..i].contains(&Val::Var(x))
+            };
+
+            let stack_delta = args.iter().enumerate().filter(|&(i, v)| {
                 match v {
                     Val::Const(_) => true,
-                    Val::Var(x) => {
-                        let seen_count = seen_counts.entry(*x).or_insert(0);
-                        *seen_count += 1;
-                        *stack.entry(*x).occurs() > *seen_count
-                    }
+                    Val::Var(x) => !should_swap(*x, i),
                 }
             }).count();
+
             let target_stack_len = stack.len() + stack_delta;
 
-            for (i, arg) in args.iter().enumerate().rev() {
-                compile_val_onto(arg, stack, code);
+            for (i, v) in args.iter().enumerate().rev() {
+                let should_swap = |e: &StackEntry| should_swap(e.var(), i);
+                compile_val_onto(v, stack, should_swap, code);
                 stack.push(None);
                 let rem_delta = target_stack_len - stack.len();
                 let offset = i - rem_delta;
@@ -167,53 +174,74 @@ fn compile_expr_onto(expr: &Expr<Id>, stack: &mut Stack, code: &mut Vec<u8>) {
     }
 }
 
-fn count_occurs_val(val: &Val<Id>, counts: &mut HashMap<Id, usize>) {
-    if let Val::Var(x) = val {
-        let x_count = counts.get_mut(x).expect("variable not found");
-        *x_count += 1;
-    }
-}
-
-fn count_occurs_expr(expr: &Expr<Id>, counts: &mut HashMap<Id, usize>) {
-    match expr {
-        Expr::Val(val) => count_occurs_val(val, counts),
-        Expr::Op(_, args) => {
-            for arg in args {
-                count_occurs_val(arg, counts);
-            }
-        }
-    }
-}
-
-fn count_occurs(block: &Block<Id>) -> HashMap<Id, usize> {
-    let mut counts = HashMap::new();
-    for (x, expr) in &block.lets {
-        if let Some(x) = x {
-            counts.insert(*x, 0);
-        }
-        count_occurs_expr(expr, &mut counts);
-    }
-    count_occurs_expr(&block.tail, &mut counts);
-    counts
-}
-
 pub fn compile(block: &Block<Id>) -> Vec<u8> {
-    let counts = count_occurs(block);
+    let liveness = analyze_liveness(block);
     let mut stack = Stack::new();
     let mut code = vec![];
-    for (x, e) in &block.lets {
-        compile_expr_onto(e, &mut stack, &mut code);
+    for ((x, e), is_last_use) in zip(&block.lets, liveness.iter()) {
+        compile_expr_onto(e, &mut stack, &is_last_use, &mut code);
         if let Some(x) = x {
-            let x_count = *counts.get(x).expect("variable not found");
-            if x_count > 0 {
-                stack.push(Some((*x, x_count)));
-            } else {
+            if is_last_use(*x) {
                 code.push(opcode::POP);
+            } else {
+                stack.push(Some(*x));
             }
         }
     }
-    compile_expr_onto(&block.tail, &mut stack, &mut code);
+    compile_expr_onto(&block.tail, &mut stack, |_| true, &mut code);
     code
+}
+
+struct BlockLiveness {
+    last_use: Vec<(Id, usize)>,
+}
+
+impl BlockLiveness {
+    fn iter(&self) -> impl Iterator<Item = impl Fn(Id) -> bool> + use<'_> {
+        let mut next_start = 0;
+        (0..).map(move |block_pos| {
+            let end = self.last_use.len();
+            let mut iter = self.last_use.iter().skip(next_start);
+            let curr_start = iter.position(|&(_, p)| p == block_pos).unwrap_or(end);
+            next_start = iter.position(|&(_, p)| p != block_pos).unwrap_or(end);
+            move |x| self.last_use[curr_start..next_start].iter().any(|&(y, _)| x == y)
+        })
+    }
+}
+
+fn analyze_liveness_expr(expr: &Expr<Id>, block_pos: usize, last_use: &mut HashMap<Id, usize>) {
+    let mut analyze_val = |val| {
+        if let &Val::Var(x) = val {
+            last_use.insert(x, block_pos).expect("unbound variable");
+        }
+    };
+
+    match expr {
+        Expr::Val(val) => analyze_val(val),
+        Expr::Op(_, args) => {
+            for arg in args {
+                analyze_val(arg);
+            }
+        }
+    }
+}
+
+fn analyze_liveness(block: &Block<Id>) -> BlockLiveness {
+    let mut last_use: HashMap<Id, usize> = HashMap::new();
+
+    for (block_pos, (x, expr)) in block.lets.iter().enumerate() {
+        if let Some(x) = x {
+            last_use.insert(*x, block_pos);
+        }
+        analyze_liveness_expr(expr, block_pos, &mut last_use);
+    }
+
+    analyze_liveness_expr(&block.tail, block.lets.len(), &mut last_use);
+
+    let mut last_use = Vec::from_iter(last_use);
+    last_use.sort_unstable_by(|(_, i), (_, j)| i.cmp(j));
+
+    BlockLiveness { last_use }
 }
 
 fn type_check_expr(expr: &Expr<Id>) -> Result<usize> {
