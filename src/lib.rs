@@ -10,6 +10,20 @@ pub use runner::run;
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Id(usize);
 
+struct IdGen(usize);
+
+impl IdGen {
+    fn new() -> IdGen {
+        IdGen(0)
+    }
+
+    fn generate(&mut self) -> Id {
+        let id = Id(self.0);
+        self.0 += 1;
+        id
+    }
+}
+
 pub enum Val<Id> {
     Const(U256),
     Var(Id),
@@ -242,17 +256,16 @@ fn resolve_expr(expr: &Expr<String>, env: &HashMap<String, Id>) -> Result<Expr<I
 }
 
 pub fn resolve(block: &Block<String>) -> Result<Block<Id>> {
-    let mut next_id = 0;
     let mut env: HashMap<String, Id> = HashMap::new();
 
+    let mut ids = IdGen::new();
     let mut lets = Vec::with_capacity(block.lets.len());
 
     for (x, expr) in &block.lets {
         let expr = resolve_expr(expr, &env)?;
 
         if let Some(x) = x {
-            let y = Id(next_id);
-            next_id += 1;
+            let y = ids.generate();
             env.insert(x.clone(), y);
             lets.push((Some(y), expr));
         } else {
