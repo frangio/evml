@@ -178,17 +178,28 @@ pub fn compile(block: &Block<Id>) -> Vec<u8> {
     let liveness = analyze_liveness(block);
     let mut stack = Stack::new();
     let mut code = vec![];
+
     for ((x, e), is_last_use) in zip(&block.lets, liveness.iter()) {
-        compile_expr_onto(e, &mut stack, &is_last_use, &mut code);
+        compile_expr_onto(e, &mut stack, is_last_use, &mut code);
         if let Some(x) = x {
-            if is_last_use(*x) {
-                code.push(opcode::POP);
-            } else {
-                stack.push(Some(*x));
-            }
+            stack.push(Some(*x));
         }
     }
+
     compile_expr_onto(&block.tail, &mut stack, |_| true, &mut code);
+
+    let excess = stack.len();
+    if excess > 0 {
+        let ret = type_check_expr(&block.tail).expect("type error");
+        for _ in 0..ret {
+            code.push(opcode_swap(excess));
+            code.push(opcode::POP);
+        }
+        if excess > ret {
+            code.resize(code.len() + excess - ret, opcode::POP);
+        }
+    }
+
     code
 }
 
@@ -452,6 +463,7 @@ mod tests {
         let block = Block {
             lets: vec![
                 (Some(id!(1)), Expr::Val(Val::Const(U256::from(100)))),
+                (Some(id!(2)), Expr::Val(Val::Const(U256::from(100)))),
             ],
             tail: Expr::Val(Val::Const(U256::from(42))),
         };
