@@ -1,25 +1,25 @@
 mod runner;
 mod opcodes;
 
-use std::collections::HashMap;
+use std::{collections::HashMap, num::NonZeroUsize};
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use revm::{bytecode::opcode, primitives::U256};
 pub use runner::run;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Id(usize);
+pub struct Id(NonZeroUsize);
 
-struct IdGen(usize);
+struct IdGen(NonZeroUsize);
 
 impl IdGen {
     fn new() -> IdGen {
-        IdGen(0)
+        IdGen(NonZeroUsize::MIN)
     }
 
     fn generate(&mut self) -> Id {
         let id = Id(self.0);
-        self.0 += 1;
+        self.0 = self.0.checked_add(1).expect("integer overflow");
         id
     }
 }
@@ -354,6 +354,10 @@ pub fn parse(source: &str) -> Result<Block<String>> {
 mod tests {
     use super::*;
 
+    macro_rules! id {
+        ($n:expr) => { Id(::std::num::NonZeroUsize::new($n).unwrap()) }
+    }
+
     #[test]
     fn test_const() {
         let block = Block {
@@ -380,9 +384,9 @@ mod tests {
     fn test_let_val() {
         let block = Block {
             lets: vec![
-                (Some(Id(0)), Expr::Val(Val::Const(U256::from(2)))),
+                (Some(id!(1)), Expr::Val(Val::Const(U256::from(2)))),
             ],
-            tail: Expr::Op(0x04, vec![Val::Const(U256::from(84)), Val::Var(Id(0))]),
+            tail: Expr::Op(0x04, vec![Val::Const(U256::from(84)), Val::Var(id!(1))]),
         };
         let bytecode = compile(&block);
         let stack = run(&bytecode).expect("execution failed");
@@ -393,9 +397,9 @@ mod tests {
     fn test_let_op() {
         let block = Block {
             lets: vec![
-                (Some(Id(0)), Expr::Op(0x04, vec![Val::Const(U256::from(84)), Val::Const(U256::from(2))])),
+                (Some(id!(1)), Expr::Op(0x04, vec![Val::Const(U256::from(84)), Val::Const(U256::from(2))])),
             ],
-            tail: Expr::Val(Val::Var(Id(0))),
+            tail: Expr::Val(Val::Var(id!(1))),
         };
         let bytecode = compile(&block);
         let stack = run(&bytecode).expect("execution failed");
@@ -406,9 +410,9 @@ mod tests {
     fn test_let_op_reuse() {
         let block = Block {
             lets: vec![
-                (Some(Id(0)), Expr::Val(Val::Const(U256::from(42)))),
+                (Some(id!(1)), Expr::Val(Val::Const(U256::from(42)))),
             ],
-            tail: Expr::Op(0x04, vec![Val::Var(Id(0)), Val::Var(Id(0))]),
+            tail: Expr::Op(0x04, vec![Val::Var(id!(1)), Val::Var(id!(1))]),
         };
         let bytecode = compile(&block);
         let stack = run(&bytecode).expect("execution failed");
@@ -419,7 +423,7 @@ mod tests {
     fn test_let_unused() {
         let block = Block {
             lets: vec![
-                (Some(Id(0)), Expr::Val(Val::Const(U256::from(100)))),
+                (Some(id!(1)), Expr::Val(Val::Const(U256::from(100)))),
             ],
             tail: Expr::Val(Val::Const(U256::from(42))),
         };
@@ -450,7 +454,7 @@ mod tests {
     fn test_type_check_pop_err() {
         let block = Block {
             lets: vec![
-                (Some(Id(0)), Expr::Op(0x50, vec![Val::Const(U256::from(42))])),
+                (Some(id!(1)), Expr::Op(0x50, vec![Val::Const(U256::from(42))])),
             ],
             tail: Expr::Val(Val::Const(U256::from(0))),
         };
