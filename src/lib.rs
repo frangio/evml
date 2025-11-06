@@ -411,6 +411,7 @@ pub fn parse(source: &str) -> Result<Block<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::{BlockPrior::*, Expr::*, Val::*};
 
     macro_rules! id {
         ($n:expr) => { Id(::std::num::NonZeroUsize::new($n).unwrap()) }
@@ -420,7 +421,7 @@ mod tests {
     fn test_const() {
         let block = Block {
             priors: vec![],
-            tail: Expr::Val(Val::Const(U256::from(42))),
+            tail: Val(Const(U256::from(42))),
         };
         let bytecode = compile(&block);
         let stack = run(&bytecode).expect("execution failed");
@@ -431,7 +432,7 @@ mod tests {
     fn test_op_div() {
         let block = Block {
             priors: vec![],
-            tail: Expr::Op(0x04, vec![Val::Const(U256::from(84)), Val::Const(U256::from(2))]),
+            tail: Op(0x04, vec![Const(U256::from(84)), Const(U256::from(2))]),
         };
         let bytecode = compile(&block);
         let stack = run(&bytecode).expect("execution failed");
@@ -442,9 +443,9 @@ mod tests {
     fn test_let_val() {
         let block = Block {
             priors: vec![
-                BlockPrior::Let(Some(id!(1)), Expr::Val(Val::Const(U256::from(2)))),
+                Let(Some(id!(1)), Val(Const(U256::from(2)))),
             ],
-            tail: Expr::Op(0x04, vec![Val::Const(U256::from(84)), Val::Var(id!(1))]),
+            tail: Op(0x04, vec![Const(U256::from(84)), Var(id!(1))]),
         };
         let bytecode = compile(&block);
         let stack = run(&bytecode).expect("execution failed");
@@ -455,9 +456,9 @@ mod tests {
     fn test_let_op() {
         let block = Block {
             priors: vec![
-                BlockPrior::Let(Some(id!(1)), Expr::Op(0x04, vec![Val::Const(U256::from(84)), Val::Const(U256::from(2))])),
+                BlockPrior::Let(Some(id!(1)), Op(0x04, vec![Const(U256::from(84)), Const(U256::from(2))])),
             ],
-            tail: Expr::Val(Val::Var(id!(1))),
+            tail: Val(Var(id!(1))),
         };
         let bytecode = compile(&block);
         let stack = run(&bytecode).expect("execution failed");
@@ -468,9 +469,9 @@ mod tests {
     fn test_let_op_reuse() {
         let block = Block {
             priors: vec![
-                BlockPrior::Let(Some(id!(1)), Expr::Val(Val::Const(U256::from(42)))),
+                BlockPrior::Let(Some(id!(1)), Val(Const(U256::from(42)))),
             ],
-            tail: Expr::Op(0x04, vec![Val::Var(id!(1)), Val::Var(id!(1))]),
+            tail: Op(0x04, vec![Var(id!(1)), Var(id!(1))]),
         };
         let bytecode = compile(&block);
         let stack = run(&bytecode).expect("execution failed");
@@ -481,10 +482,10 @@ mod tests {
     fn test_let_unused() {
         let block = Block {
             priors: vec![
-                BlockPrior::Let(Some(id!(1)), Expr::Val(Val::Const(U256::from(100)))),
-                BlockPrior::Let(Some(id!(2)), Expr::Val(Val::Const(U256::from(100)))),
+                BlockPrior::Let(Some(id!(1)), Val(Const(U256::from(100)))),
+                BlockPrior::Let(Some(id!(2)), Val(Const(U256::from(100)))),
             ],
-            tail: Expr::Val(Val::Const(U256::from(42))),
+            tail: Val(Const(U256::from(42))),
         };
         let bytecode = compile(&block);
         let stack = run(&bytecode).expect("execution failed");
@@ -495,7 +496,7 @@ mod tests {
     fn test_type_check_div_ok() {
         let block = Block {
             priors: vec![],
-            tail: Expr::Op(0x04, vec![Val::Const(U256::from(84)), Val::Const(U256::from(2))]),
+            tail: Op(0x04, vec![Const(U256::from(84)), Const(U256::from(2))]),
         };
         assert!(type_check(&block).is_ok());
     }
@@ -504,7 +505,7 @@ mod tests {
     fn test_type_check_div_err() {
         let block = Block {
             priors: vec![],
-            tail: Expr::Op(0x04, vec![Val::Const(U256::from(84))]),
+            tail: Op(0x04, vec![Const(U256::from(84))]),
         };
         assert!(type_check(&block).is_err());
     }
@@ -513,9 +514,9 @@ mod tests {
     fn test_type_check_pop_err() {
         let block = Block {
             priors: vec![
-                BlockPrior::Let(Some(id!(1)), Expr::Op(0x50, vec![Val::Const(U256::from(42))])),
+                BlockPrior::Let(Some(id!(1)), Op(0x50, vec![Const(U256::from(42))])),
             ],
-            tail: Expr::Val(Val::Const(U256::from(0))),
+            tail: Val(Const(U256::from(0))),
         };
         assert!(type_check(&block).is_err());
     }
