@@ -291,7 +291,7 @@ pub fn type_check(block: &Block<Id>) -> Result<()> {
     Ok(())
 }
 
-fn resolve_val(val: &Val<String>, env: &HashMap<String, Id>) -> Result<Val<Id>> {
+fn resolve_val(val: &Val<String>, env: &HashMap<&String, Id>) -> Result<Val<Id>> {
     Ok(match val {
         Val::Const(c) => Val::Const(*c),
         Val::Var(x) => {
@@ -300,7 +300,7 @@ fn resolve_val(val: &Val<String>, env: &HashMap<String, Id>) -> Result<Val<Id>> 
     })
 }
 
-fn resolve_expr(expr: &Expr<String>, env: &HashMap<String, Id>) -> Result<Expr<Id>> {
+fn resolve_expr(expr: &Expr<String>, env: &HashMap<&String, Id>) -> Result<Expr<Id>> {
     Ok(match expr {
         Expr::Val(val) => Expr::Val(resolve_val(val, env)?),
         Expr::Op(op, vals) => {
@@ -311,7 +311,7 @@ fn resolve_expr(expr: &Expr<String>, env: &HashMap<String, Id>) -> Result<Expr<I
 }
 
 pub fn resolve(block: &Block<String>) -> Result<Block<Id>> {
-    let mut env: HashMap<String, Id> = HashMap::new();
+    let mut env: HashMap<&String, Id> = HashMap::new();
 
     let mut ids = IdGen::new();
     let mut priors = Vec::with_capacity(block.priors.len());
@@ -320,7 +320,7 @@ pub fn resolve(block: &Block<String>) -> Result<Block<Id>> {
         match prior {
             BlockPrior::Let(x, expr) => {
                 let expr = resolve_expr(expr, &env)?;
-                let y = x.clone().map(|x| {
+                let y = x.as_ref().map(|x| {
                     let y = ids.generate();
                     env.insert(x, y);
                     y
