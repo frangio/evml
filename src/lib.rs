@@ -1,7 +1,7 @@
 mod runner;
 mod opcodes;
 
-use std::{collections::HashMap, iter::zip, num::NonZeroUsize};
+use std::{collections::HashMap, iter::{once, zip}, num::NonZeroUsize};
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use revm::{bytecode::opcode, primitives::U256};
@@ -107,6 +107,16 @@ fn opcode_dup(depth: usize) -> u8 {
     opcode::DUP1 + depth as u8
 }
 
+fn instruction_push<const N: usize>(value: [u8; N]) -> impl Iterator<Item = u8> {
+    assert!(N <= 32);
+    let mut size = N;
+    let mut value = value.into_iter().peekable();
+    while value.next_if_eq(&0).is_some() {
+        size -= 1;
+    }
+    once(opcode::PUSH0 + size as u8).chain(value)
+}
+
 fn compile_val_onto(
     val: &Val<Id>,
     stack: &mut Stack,
@@ -115,8 +125,7 @@ fn compile_val_onto(
 ) {
     match val {
         Val::Const(c) => {
-            code.push(opcode::PUSH32);
-            code.extend_from_slice(&c.to_be_bytes::<32>());
+            code.extend(instruction_push(c.to_be_bytes::<32>()));
         }
 
         Val::Var(x) => {
