@@ -29,7 +29,7 @@ fn main() -> Result<()> {
     let block = parse(&source)?;
     let block = resolve(&block)?;
     type_check(&block)?;
-    let code = compile(&block);
+    let code = compile(block);
     let asm = disasm(&code);
     let result = run(&code);
 

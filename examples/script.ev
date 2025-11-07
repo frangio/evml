@@ -1,2 +1,9 @@
-let _ = @mstore(0, 1);
-@mload(0)
+let a = 1;
+join q(y) {
+  @add(a, y)
+}
+join k(x) {
+  let b = @add(a, x);
+  jump q(b)
+}
+jump k(a)

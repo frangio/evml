@@ -1,7 +1,7 @@
 mod runner;
 mod opcodes;
 
-use std::{collections::HashMap, iter::{once, zip}, num::NonZeroUsize};
+use std::{collections::{HashMap, HashSet}, iter::{once, zip}, mem::take, num::NonZeroUsize};
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use revm::{bytecode::opcode, primitives::U256};
@@ -35,13 +35,19 @@ pub enum Expr<Id> {
     Op(u8, Vec<Val<Id>>),
 }
 
+pub enum TailExpr<Id> {
+    Expr(Expr<Id>),
+    Jump(Id, Vec<Id>),
+}
+
 pub enum BlockPrior<Id> {
     Let(Option<Id>, Expr<Id>),
+    LetJoin(Id, Vec<Id>, Block<Id>),
 }
 
 pub struct Block<Id> {
     priors: Vec<BlockPrior<Id>>,
-    tail: Expr<Id>,
+    tail: TailExpr<Id>,
 }
 
 struct Stack(Vec<Option<Id>>);
@@ -84,6 +90,10 @@ impl Stack {
 impl StackEntry<'_> {
     fn var(&self) -> Id {
         self.stack.0[self.index].expect("stack item is temporary")
+    }
+
+    fn set(&mut self, x: Id) {
+        self.stack.0[self.index] = Some(x);
     }
 
     fn depth(&self) -> usize {
@@ -187,34 +197,194 @@ fn compile_expr_onto(
     }
 }
 
-pub fn compile(block: &Block<Id>) -> Vec<u8> {
-    let liveness = analyze_liveness(block);
-    let mut stack = Stack::new();
-    let mut code = vec![];
+struct BlockCode {
+    code: Vec<u8>,
+    refs: Vec<(usize, Id)>,
+}
 
-    for (prior, is_last_use) in zip(&block.priors, liveness.iter()) {
+struct CompileQueue {
+    buffer: Vec<(Id, Option<BlockCode>)>,
+    joins: HashMap<Id, (Vec<Id>, Block<Id>, BlockLiveness, Option<Stack>)>,
+    next: usize,
+}
+
+impl CompileQueue {
+    fn new() -> Self {
+        CompileQueue {
+            buffer: Vec::new(),
+            joins: HashMap::new(),
+            next: 0,
+        }
+    }
+
+    fn register(&mut self, id: Id, args: Vec<Id>, block: Block<Id>, liveness: BlockLiveness) {
+        let other_join = self.joins.insert(id, (args, block, liveness, None));
+        assert!(other_join.is_none(), "duplicate label");
+    }
+
+    fn get_args(&self, id: Id) -> &[Id] {
+        let join = self.joins.get(&id).unwrap();
+        &join.0
+    }
+
+    fn enqueue(&mut self, id: Id, stack: Stack) {
+        let join = self.joins.get_mut(&id).unwrap();
+        let other_stack = join.3.replace(stack);
+        if let Some(_other_stack) = other_stack {
+            todo!();
+        } else {
+            self.buffer.push((id, None));
+        }
+    }
+
+    fn next(&mut self) -> Option<(Id, Block<Id>, BlockLiveness, Stack)> {
+        let (k, _) = self.buffer.get(self.next)?;
+        let (_, block, liveness, stack) = self.joins.remove(k).unwrap();
+        self.next += 1;
+        Some((*k, block, liveness, stack.unwrap()))
+    }
+
+    fn set_result(&mut self, id: Id, code: BlockCode) {
+        let (k, result) = &mut self.buffer[self.next - 1];
+        assert!(*k == id, "mismatched result");
+        *result = Some(code);
+    }
+
+    fn into_results(self) -> Vec<(Id, BlockCode)> {
+        self.buffer.into_iter().map(|(k, b)| (k, b.unwrap())).collect()
+    }
+}
+
+fn compile_block(
+    block: Block<Id>,
+    mut liveness: BlockLiveness,
+    mut stack: Stack,
+    queue: &mut CompileQueue,
+    join_uses: &HashMap<Id, HashSet<Id>>,
+) -> BlockCode {
+    let mut joins_liveness = take(&mut liveness.joins).into_iter();
+    let mut code = vec![];
+    let mut refs = vec![];
+
+    for (prior, is_last_use) in zip(block.priors, liveness.iter()) {
         match prior {
             BlockPrior::Let(x, e) => {
-                compile_expr_onto(e, &mut stack, is_last_use, &mut code);
+                compile_expr_onto(&e, &mut stack, is_last_use, &mut code);
                 if let Some(x) = x {
-                    stack.push(Some(*x));
+                    stack.push(Some(x));
                 }
+            }
+
+            BlockPrior::LetJoin(k, xs, b) => {
+                let (j, liveness) = joins_liveness.next().unwrap();
+                assert!(j == k);
+                queue.register(k, xs, b, liveness);
             }
         }
     }
 
-    compile_expr_onto(&block.tail, &mut stack, |_| true, &mut code);
+    match &block.tail {
+        TailExpr::Expr(tail_expr) => {
+            compile_expr_onto(tail_expr, &mut stack, |_| true, &mut code);
+            let excess = stack.len();
+            if excess > 0 {
+                let ret = size_of(tail_expr);
+                for _ in 0..ret {
+                    code.push(opcode_swap(excess));
+                    code.push(opcode::POP);
+                }
+                if excess > ret {
+                    code.resize(code.len() + excess - ret, opcode::POP);
+                }
+            }
+        }
 
-    let excess = stack.len();
-    if excess > 0 {
-        let ret = type_check_expr(&block.tail).expect("type error");
-        for _ in 0..ret {
-            code.push(opcode_swap(excess));
-            code.push(opcode::POP);
+        TailExpr::Jump(k, xs) => {
+            let k_uses = join_uses.get(k).unwrap();
+            let args = queue.get_args(*k);
+            for (x, arg) in zip(xs, args) {
+                let mut e = stack.entry(*x);
+                if k_uses.contains(x) {
+                    code.push(opcode_dup(e.depth()));
+                    stack.push(Some(*arg));
+                } else {
+                    e.set(*arg);
+                }
+            }
+            queue.enqueue(*k, stack);
+            refs.push((code.len(), *k));
+            code.push(opcode::CODESIZE);
+            code.push(opcode::JUMP);
         }
-        if excess > ret {
-            code.resize(code.len() + excess - ret, opcode::POP);
+    }
+
+    BlockCode { code, refs }
+}
+
+pub fn compile(block: Block<Id>) -> Vec<u8> {
+    let mut queue = CompileQueue::new();
+
+    let (liveness, join_uses) = analyze_liveness(&block);
+    let entry = compile_block(block, liveness, Stack::new(), &mut queue, &join_uses);
+
+    while let Some((k, block, liveness, stack)) = queue.next() {
+        let code = compile_block(block, liveness, stack, &mut queue, &join_uses);
+        queue.set_result(k, code);
+    }
+
+    link(entry, queue.into_results())
+}
+
+fn link_block(
+    block: &BlockCode,
+    locs: &HashMap<Id, usize>,
+    pending_refs: &mut Vec<(usize, Id)>,
+    code: &mut Vec<u8>,
+) {
+    let mut start = 0;
+    for &(pos, j) in &block.refs {
+        code.extend(&block.code[start..pos]);
+        start = pos + 1;
+        assert!(block.code[pos..pos + 2] == [opcode::CODESIZE, opcode::JUMP]);
+        match locs.get(&j) {
+            Some(x) => {
+                code.extend(instruction_push(x.to_be_bytes()))
+            }
+            None => {
+                pending_refs.push((code.len(), j));
+                code.push(opcode::PUSH2);
+                code.extend([0, 0]);
+            }
         }
+    }
+    code.extend(&block.code[start..]);
+}
+
+fn link(entry: BlockCode, blocks: Vec<(Id, BlockCode)>) -> Vec<u8> {
+    let mut locs: HashMap<Id, usize> = HashMap::new();
+    let mut code = Vec::new();
+    let mut pending_refs = Vec::new();
+
+    link_block(&entry, &locs, &mut pending_refs, &mut code);
+
+    for (k, block) in blocks {
+        if let Some((pos, _)) = pending_refs.pop_if(|(pos, j)| *j == k && *pos + 4 == code.len()) {
+            assert!(code[pos..] == [opcode::PUSH2, 0, 0, opcode::JUMP]);
+            code.truncate(pos);
+        }
+
+        let other_loc = locs.insert(k, code.len());
+        assert!(other_loc.is_none(), "duplicate id");
+
+        code.push(opcode::JUMPDEST);
+
+        link_block(&block, &locs, &mut pending_refs, &mut code);
+    }
+
+    for (pos, j) in pending_refs {
+        assert!(code[pos..pos + 4] == [opcode::PUSH2, 0, 0, opcode::JUMP]);
+        let x = locs.get(&j).unwrap();
+        code[pos + 1..pos + 2].copy_from_slice(&x.to_be_bytes());
     }
 
     code
@@ -222,6 +392,7 @@ pub fn compile(block: &Block<Id>) -> Vec<u8> {
 
 struct BlockLiveness {
     last_use: Vec<(Id, usize)>,
+    joins: Vec<(Id, BlockLiveness)>,
 }
 
 impl BlockLiveness {
@@ -240,7 +411,7 @@ impl BlockLiveness {
 fn analyze_liveness_expr(expr: &Expr<Id>, block_pos: usize, last_use: &mut HashMap<Id, usize>) {
     let mut analyze_val = |val| {
         if let &Val::Var(x) = val {
-            last_use.insert(x, block_pos).expect("unbound variable");
+            last_use.insert(x, block_pos);
         }
     };
 
@@ -254,50 +425,141 @@ fn analyze_liveness_expr(expr: &Expr<Id>, block_pos: usize, last_use: &mut HashM
     }
 }
 
-fn analyze_liveness(block: &Block<Id>) -> BlockLiveness {
-    let mut last_use: HashMap<Id, usize> = HashMap::new();
+fn analyze_liveness_block(block: &Block<Id>, join_uses: &mut HashMap<Id, HashSet<Id>>) -> BlockLiveness {
+    let mut last_use = HashMap::new();
+    let mut joins = Vec::new();
 
     for (block_pos, prior) in block.priors.iter().enumerate() {
         match prior {
             BlockPrior::Let(x, expr) => {
                 if let Some(x) = x {
-                    last_use.insert(*x, block_pos);
+                    let other_pos = last_use.insert(*x, block_pos);
+                    assert!(other_pos.is_none());
                 }
                 analyze_liveness_expr(expr, block_pos, &mut last_use);
+            }
+
+            BlockPrior::LetJoin(k, xs, b) => {
+                let k_liveness = analyze_liveness_block(b, join_uses);
+                let mut k_uses = HashSet::with_capacity(k_liveness.last_use.len());
+                for &(y, _) in &k_liveness.last_use {
+                    if xs.contains(&y) {
+                        continue;
+                    }
+                    if last_use.insert(y, block_pos).is_some() {
+                        k_uses.insert(y);
+                    }
+                }
+                joins.push((*k, k_liveness));
+                join_uses.insert(*k, k_uses);
             }
         }
     }
 
-    analyze_liveness_expr(&block.tail, block.priors.len(), &mut last_use);
+    let tail_pos = block.priors.len();
+    match &block.tail {
+        TailExpr::Expr(tail_expr) => {
+            analyze_liveness_expr(tail_expr, tail_pos, &mut last_use);
+        }
+
+        TailExpr::Jump(k, args) => {
+            for arg in args {
+                last_use.insert(*arg, tail_pos);
+            }
+            for x in join_uses.get(k).unwrap() {
+                last_use.insert(*x, tail_pos);
+            }
+        }
+    }
 
     let mut last_use = Vec::from_iter(last_use);
     last_use.sort_unstable_by(|(_, i), (_, j)| i.cmp(j));
 
-    BlockLiveness { last_use }
+    BlockLiveness { last_use, joins }
 }
 
-fn type_check_expr(expr: &Expr<Id>) -> Result<usize> {
+fn analyze_liveness(block: &Block<Id>) -> (BlockLiveness, HashMap<Id, HashSet<Id>>) {
+    let mut join_uses = HashMap::new();
+    let block_liveness = analyze_liveness_block(block, &mut join_uses);
+    (block_liveness, join_uses)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Type {
+    Val,
+    Join(usize),
+}
+
+fn size_of(expr: &Expr<Id>) -> usize {
     match expr {
-        Expr::Val(_) => Ok(1),
+        Expr::Val(_) => 1,
+        Expr::Op(op, _) => opcodes::info(*op).unwrap().outputs,
+    }
+}
+
+fn type_check_expr(expr: &Expr<Id>, env: &HashMap<Id, Type>) -> Result<usize> {
+    let type_check_val = |v: &Val<Id>| -> Result<usize> {
+        if let Val::Var(x) = v {
+            ensure!(env.get(x).copied() == Some(Type::Val), "variable {x:?} is not a value");
+        }
+        Ok(1)
+    };
+
+    match expr {
+        Expr::Val(v) => type_check_val(v),
+
         Expr::Op(op, args) => {
             let Some(info) = opcodes::info(*op) else { bail!("unknown opcode {op:#04x?}") };
             ensure!(args.len() == info.inputs);
+            for arg in args {
+                type_check_val(arg)?;
+            }
             Ok(info.outputs)
         }
     }
 }
 
-pub fn type_check(block: &Block<Id>) -> Result<()> {
+fn type_check_block(block: &Block<Id>, mut env: HashMap<Id, Type>) -> Result<()> {
     for prior in &block.priors {
         match prior {
             BlockPrior::Let(x, e) => {
-                let outputs = type_check_expr(e)?;
+                let outputs = type_check_expr(e, &env)?;
                 ensure!(outputs == x.iter().count(), "void operation can't be assigned");
+                if let Some(x) = x {
+                    env.insert(*x, Type::Val);
+                }
+            }
+
+            BlockPrior::LetJoin(k, xs, block) => {
+                env.insert(*k, Type::Join(xs.len()));
+                let mut env = env.clone();
+                for x in xs {
+                    env.insert(*x, Type::Val);
+                }
+                type_check_block(block, env)?;
             }
         }
     }
-    type_check_expr(&block.tail)?;
+
+    match &block.tail {
+        TailExpr::Expr(expr) => {
+            type_check_expr(expr, &env)?;
+        }
+
+        TailExpr::Jump(k, xs) => {
+            let &Type::Join(arity) = env.get(k).unwrap() else {
+                bail!("cannot jump to value")
+            };
+            ensure!(xs.len() == arity, "bad jump argument count");
+        }
+    }
+
     Ok(())
+}
+
+pub fn type_check(block: &Block<Id>) -> Result<()> {
+    let env = HashMap::new();
+    type_check_block(block, env)
 }
 
 fn resolve_val(val: &Val<String>, env: &HashMap<&String, Id>) -> Result<Val<Id>> {
@@ -319,10 +581,11 @@ fn resolve_expr(expr: &Expr<String>, env: &HashMap<&String, Id>) -> Result<Expr<
     })
 }
 
-pub fn resolve(block: &Block<String>) -> Result<Block<Id>> {
-    let mut env: HashMap<&String, Id> = HashMap::new();
-
-    let mut ids = IdGen::new();
+fn resolve_block<'a>(
+    block: &'a Block<String>,
+    ids: &mut IdGen,
+    mut env: HashMap<&'a String, Id>,
+) -> Result<Block<Id>> {
     let mut priors = Vec::with_capacity(block.priors.len());
 
     for prior in &block.priors {
@@ -336,12 +599,40 @@ pub fn resolve(block: &Block<String>) -> Result<Block<Id>> {
                 });
                 priors.push(BlockPrior::Let(y, expr));
             }
+
+            BlockPrior::LetJoin(k, xs, block) => {
+                let j = ids.generate();
+                env.insert(k, j);
+                let mut env = env.clone();
+                let ys = xs.iter().map(|x| {
+                    let y = ids.generate();
+                    env.insert(x, y);
+                    y
+                }).collect();
+                let block = resolve_block(block, ids, env)?;
+                priors.push(BlockPrior::LetJoin(j, ys, block));
+            }
         }
     }
 
-    let tail = resolve_expr(&block.tail, &env)?;
+    let tail = match &block.tail {
+        TailExpr::Expr(expr) => TailExpr::Expr(resolve_expr(expr, &env)?),
+        TailExpr::Jump(k, xs) => {
+            let k = *env.get(k).with_context(|| format!("unbound label {k}"))?;
+            let xs = xs.iter().map(|x| {
+                env.get(x).copied().with_context(|| format!("unbound variable {x}"))
+            }).collect::<Result<_>>()?;
+            TailExpr::Jump(k, xs)
+        }
+    };
 
     Ok(Block { priors, tail })
+}
+
+pub fn resolve(block: &Block<String>) -> Result<Block<Id>> {
+    let mut ids = IdGen::new();
+    let env = HashMap::new();
+    resolve_block(block, &mut ids, env)
 }
 
 pub fn parse(source: &str) -> Result<Block<String>> {
@@ -385,28 +676,68 @@ pub fn parse(source: &str) -> Result<Block<String>> {
             expr_val,
         )).padded();
 
+        let args = text::ident()
+            .map(|id: &str| id.to_owned())
+            .padded()
+            .separated_by(just(','))
+            .collect::<Vec<_>>()
+            .delimited_by(just('('), just(')'))
+            .padded();
+
+        let tail_expr_jump = text::keyword("jump")
+            .padded()
+            .ignore_then(
+                text::ident().map(|id: &str| id.to_owned()),
+            )
+            .padded()
+            .then(args)
+            .map(|(k, xs)| TailExpr::Jump(k, xs));
+
+
+        let tail_expr = choice((
+            tail_expr_jump,
+            expr.map(TailExpr::Expr),
+        ));
+
         let block_let = text::keyword("let")
-            .ignore_then(text::whitespace())
+            .padded()
             .ignore_then(
                 choice((
                     just('_').to(None),
                     text::ident().map(|id: &str| Some(id.to_owned())),
                 ))
             )
-            .then_ignore(text::whitespace())
+            .padded()
             .then_ignore(just('='))
             .then(expr)
-            .then_ignore(just(';'));
+            .then_ignore(just(';'))
+            .map(|(x, e)| BlockPrior::Let(x, e));
 
-        let block = block_let
-            .padded()
-            .map(|(x, e)| BlockPrior::Let(x, e))
-            .repeated()
-            .collect()
-            .then(expr)
-            .map(|(priors, tail)| Block { priors, tail });
+        let block = recursive(|block| {
+            let block_join = text::keyword("join")
+                .padded()
+                .ignore_then(text::ident().map(|id: &str| id.to_owned()))
+                .padded()
+                .then(args)
+                .then(
+                    block
+                        .padded()
+                        .delimited_by(just('{'), just('}'))
+                )
+                .padded()
+                .map(|((k, xs), b)| BlockPrior::LetJoin(k, xs, b));
 
-        block.padded().then_ignore(end())
+
+            choice((block_let, block_join))
+                .padded()
+                .repeated()
+                .collect()
+                .then(tail_expr)
+                .padded()
+                .map(|(priors, tail)| Block { priors, tail })
+        });
+
+        block.then_ignore(end())
     }
 
     let b = parser()
@@ -420,7 +751,7 @@ pub fn parse(source: &str) -> Result<Block<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::{BlockPrior::*, Expr::*, Val::*};
+    use super::{BlockPrior::*, Expr::*, TailExpr::*, Val::*};
 
     macro_rules! id {
         ($n:expr) => { Id(::std::num::NonZeroUsize::new($n).unwrap()) }
@@ -430,9 +761,9 @@ mod tests {
     fn test_const() {
         let block = Block {
             priors: vec![],
-            tail: Val(Const(U256::from(42))),
+            tail: Expr(Val(Const(U256::from(42)))),
         };
-        let bytecode = compile(&block);
+        let bytecode = compile(block);
         let stack = run(&bytecode).expect("execution failed");
         assert_eq!(stack, vec![U256::from(42)]);
     }
@@ -441,9 +772,9 @@ mod tests {
     fn test_op_div() {
         let block = Block {
             priors: vec![],
-            tail: Op(0x04, vec![Const(U256::from(84)), Const(U256::from(2))]),
+            tail: Expr(Op(0x04, vec![Const(U256::from(84)), Const(U256::from(2))])),
         };
-        let bytecode = compile(&block);
+        let bytecode = compile(block);
         let stack = run(&bytecode).expect("execution failed");
         assert_eq!(stack, vec![U256::from(42)]);
     }
@@ -454,9 +785,9 @@ mod tests {
             priors: vec![
                 Let(Some(id!(1)), Val(Const(U256::from(2)))),
             ],
-            tail: Op(0x04, vec![Const(U256::from(84)), Var(id!(1))]),
+            tail: Expr(Op(0x04, vec![Const(U256::from(84)), Var(id!(1))])),
         };
-        let bytecode = compile(&block);
+        let bytecode = compile(block);
         let stack = run(&bytecode).expect("execution failed");
         assert_eq!(stack, vec![U256::from(42)]);
     }
@@ -465,11 +796,11 @@ mod tests {
     fn test_let_op() {
         let block = Block {
             priors: vec![
-                BlockPrior::Let(Some(id!(1)), Op(0x04, vec![Const(U256::from(84)), Const(U256::from(2))])),
+                Let(Some(id!(1)), Op(0x04, vec![Const(U256::from(84)), Const(U256::from(2))])),
             ],
-            tail: Val(Var(id!(1))),
+            tail: Expr(Val(Var(id!(1)))),
         };
-        let bytecode = compile(&block);
+        let bytecode = compile(block);
         let stack = run(&bytecode).expect("execution failed");
         assert_eq!(stack, vec![U256::from(42)]);
     }
@@ -478,11 +809,11 @@ mod tests {
     fn test_let_op_reuse() {
         let block = Block {
             priors: vec![
-                BlockPrior::Let(Some(id!(1)), Val(Const(U256::from(42)))),
+                Let(Some(id!(1)), Val(Const(U256::from(42)))),
             ],
-            tail: Op(0x04, vec![Var(id!(1)), Var(id!(1))]),
+            tail: Expr(Op(0x04, vec![Var(id!(1)), Var(id!(1))])),
         };
-        let bytecode = compile(&block);
+        let bytecode = compile(block);
         let stack = run(&bytecode).expect("execution failed");
         assert_eq!(stack, vec![U256::from(1)]);
     }
@@ -491,12 +822,29 @@ mod tests {
     fn test_let_unused() {
         let block = Block {
             priors: vec![
-                BlockPrior::Let(Some(id!(1)), Val(Const(U256::from(100)))),
-                BlockPrior::Let(Some(id!(2)), Val(Const(U256::from(100)))),
+                Let(Some(id!(1)), Val(Const(U256::from(100)))),
+                Let(Some(id!(2)), Val(Const(U256::from(100)))),
             ],
-            tail: Val(Const(U256::from(42))),
+            tail: Expr(Val(Const(U256::from(42)))),
         };
-        let bytecode = compile(&block);
+        let bytecode = compile(block);
+        let stack = run(&bytecode).expect("execution failed");
+        assert_eq!(stack, vec![U256::from(42)]);
+    }
+
+    #[test]
+    fn test_join_jump() {
+        let block = Block {
+            priors: vec![
+                Let(Some(id!(1)), Val(Const(U256::from(21)))),
+                LetJoin(id!(2), vec![id!(3)], Block {
+                    priors: vec![],
+                    tail: Expr(Op(0x01, vec![Var(id!(3)), Var(id!(1))])),
+                }),
+            ],
+            tail: Jump(id!(2), vec![id!(1)]),
+        };
+        let bytecode = compile(block);
         let stack = run(&bytecode).expect("execution failed");
         assert_eq!(stack, vec![U256::from(42)]);
     }
@@ -505,7 +853,7 @@ mod tests {
     fn test_type_check_div_ok() {
         let block = Block {
             priors: vec![],
-            tail: Op(0x04, vec![Const(U256::from(84)), Const(U256::from(2))]),
+            tail: Expr(Op(0x04, vec![Const(U256::from(84)), Const(U256::from(2))])),
         };
         assert!(type_check(&block).is_ok());
     }
@@ -514,7 +862,7 @@ mod tests {
     fn test_type_check_div_err() {
         let block = Block {
             priors: vec![],
-            tail: Op(0x04, vec![Const(U256::from(84))]),
+            tail: Expr(Op(0x04, vec![Const(U256::from(84))])),
         };
         assert!(type_check(&block).is_err());
     }
@@ -523,9 +871,9 @@ mod tests {
     fn test_type_check_pop_err() {
         let block = Block {
             priors: vec![
-                BlockPrior::Let(Some(id!(1)), Op(0x50, vec![Const(U256::from(42))])),
+                Let(Some(id!(1)), Op(0x50, vec![Const(U256::from(42))])),
             ],
-            tail: Val(Const(U256::from(0))),
+            tail: Expr(Val(Const(U256::from(0)))),
         };
         assert!(type_check(&block).is_err());
     }
