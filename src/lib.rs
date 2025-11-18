@@ -1,5 +1,8 @@
+#![allow(unused)]
+
 mod runner;
 mod opcodes;
+mod scc;
 
 use std::{collections::{HashMap, HashSet}, iter::{once, zip}, mem::take, num::NonZeroUsize};
 
