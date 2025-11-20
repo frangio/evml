@@ -371,8 +371,7 @@ fn link_block(
             }
             None => {
                 pending_refs.push((code.len(), j));
-                code.push(opcode::PUSH2);
-                code.extend([0, 0]);
+                code.extend([opcode::PUSH2, 0, 0]);
             }
         }
     }
