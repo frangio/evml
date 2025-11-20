@@ -13,11 +13,27 @@ pub use runner::run;
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Id(NonZeroUsize);
 
+#[repr(usize)]
+enum IdReserve {
+    Root = NonZeroUsize::MIN.get(),
+    Unallocated,
+}
+
+impl IdReserve {
+    const fn into_non_zero(self) -> NonZeroUsize {
+        NonZeroUsize::new(self as usize).unwrap()
+    }
+}
+
+impl Id {
+    const ROOT: Self = Id(IdReserve::Root.into_non_zero());
+}
+
 struct IdGen(NonZeroUsize);
 
 impl IdGen {
     fn new() -> IdGen {
-        IdGen(NonZeroUsize::MIN)
+        IdGen(IdReserve::Unallocated.into_non_zero())
     }
 
     fn generate(&mut self) -> Id {
