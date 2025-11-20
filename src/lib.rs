@@ -868,6 +868,21 @@ mod tests {
     }
 
     #[test]
+    fn test_join_jump_rec() {
+        let block = Block {
+            priors: vec![
+                LetJoin(id!(1), vec![], Block {
+                    priors: vec![],
+                    tail: Jump(id!(1), vec![]),
+                }),
+            ],
+            tail: Jump(id!(1), vec![]),
+        };
+        let bytecode = compile(block);
+        assert_eq!(bytecode, [opcode::JUMPDEST, opcode::PUSH0, opcode::JUMP]);
+    }
+
+    #[test]
     fn test_type_check_div_ok() {
         let block = Block {
             priors: vec![],
