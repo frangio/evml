@@ -623,7 +623,7 @@ pub fn type_check(block: &core::Block) -> Result<()> {
     type_check_block(block, env)
 }
 
-fn resolve_val(val: &ast::Val<String>, env: &HashMap<&String, Id>) -> Result<core::Val> {
+fn resolve_val(val: &ast::Val<&str>, env: &HashMap<&str, Id>) -> Result<core::Val> {
     Ok(match val {
         ast::Val::Const(c) => core::Val::Const(*c),
         ast::Val::Var(x) => {
@@ -632,7 +632,7 @@ fn resolve_val(val: &ast::Val<String>, env: &HashMap<&String, Id>) -> Result<cor
     })
 }
 
-fn resolve_expr(expr: &ast::Expr<String>, env: &HashMap<&String, Id>) -> Result<core::Expr> {
+fn resolve_expr(expr: &ast::Expr<&str>, env: &HashMap<&str, Id>) -> Result<core::Expr> {
     Ok(match expr {
         ast::Expr::Val(val) => core::Expr::Val(resolve_val(val, env)?),
         ast::Expr::Op(op, vals) => {
@@ -643,9 +643,9 @@ fn resolve_expr(expr: &ast::Expr<String>, env: &HashMap<&String, Id>) -> Result<
 }
 
 fn resolve_block<'a>(
-    block: &'a ast::Block<String>,
+    block: &ast::Block<&'a str>,
     ids: &mut IdGen,
-    mut env: HashMap<&'a String, Id>,
+    mut env: HashMap<&'a str, Id>,
 ) -> Result<core::Block> {
     let mut priors = Vec::with_capacity(block.priors.len());
 
@@ -690,17 +690,17 @@ fn resolve_block<'a>(
     Ok(core::Block { priors, tail })
 }
 
-pub fn resolve(block: &ast::Block<String>) -> Result<core::Block> {
+pub fn resolve(block: &ast::Block<&str>) -> Result<core::Block> {
     let mut ids = IdGen::new();
     let env = HashMap::new();
     resolve_block(block, &mut ids, env)
 }
 
-pub fn parse(source: &str) -> Result<ast::Block<String>> {
+pub fn parse(source: &str) -> Result<ast::Block<&str>> {
     use chumsky::prelude::*;
     use ast::*;
 
-    fn parser<'a>() -> impl Parser<'a, &'a str, Block<String>, extra::Err<Rich<'a, char>>> {
+    fn parser<'a>() -> impl Parser<'a, &'a str, Block<&'a str>, extra::Err<Rich<'a, char>>> {
         let val_const = text::digits(10)
             .to_slice()
             .try_map(|digits: &str, span| {
@@ -711,7 +711,7 @@ pub fn parse(source: &str) -> Result<ast::Block<String>> {
             });
 
         let val_var = text::ident()
-            .map(|x: &str| Val::Var(x.to_owned()));
+            .map(|x: &str| Val::Var(x));
 
         let val = choice((
             val_const,
@@ -739,7 +739,6 @@ pub fn parse(source: &str) -> Result<ast::Block<String>> {
         )).padded();
 
         let args = text::ident()
-            .map(|id: &str| id.to_owned())
             .padded()
             .separated_by(just(','))
             .collect::<Vec<_>>()
@@ -749,7 +748,7 @@ pub fn parse(source: &str) -> Result<ast::Block<String>> {
         let tail_expr_jump = text::keyword("jump")
             .padded()
             .ignore_then(
-                text::ident().map(|id: &str| id.to_owned()),
+                text::ident()
             )
             .padded()
             .then(args)
@@ -766,7 +765,7 @@ pub fn parse(source: &str) -> Result<ast::Block<String>> {
             .ignore_then(
                 choice((
                     just('_').to(None),
-                    text::ident().map(|id: &str| Some(id.to_owned())),
+                    text::ident().map(Some),
                 ))
             )
             .padded()
@@ -778,7 +777,7 @@ pub fn parse(source: &str) -> Result<ast::Block<String>> {
         let block = recursive(|block| {
             let block_join = text::keyword("join")
                 .padded()
-                .ignore_then(text::ident().map(|id: &str| id.to_owned()))
+                .ignore_then(text::ident())
                 .padded()
                 .then(args)
                 .then(
