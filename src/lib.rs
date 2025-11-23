@@ -518,7 +518,7 @@ fn size_of(expr: &Expr<Id>) -> usize {
 fn type_check_expr(expr: &Expr<Id>, env: &HashMap<Id, Type>) -> Result<usize> {
     let type_check_val = |v: &Val<Id>| -> Result<usize> {
         if let Val::Var(x) = v {
-            ensure!(env.get(x).copied() == Some(Type::Val), "variable {x:?} is not a value");
+            ensure!(env.get(x).copied() == Some(Type::Val), "variable is not a value");
         }
         Ok(1)
     };
