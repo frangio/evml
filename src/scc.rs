@@ -1,4 +1,4 @@
-use std::{collections::{hash_map::Entry, HashMap}, hash::Hash, mem, ops::Deref};
+use std::{collections::{hash_map::Entry, HashMap}, hash::Hash, iter::{chain, successors, zip}, mem, ops::Deref};
 
 pub struct Edges<T> {
     inner: Vec<(T, T)>,
@@ -180,14 +180,11 @@ pub fn scc<T: Copy + Ord + Hash>(edges: &Edges<T>) -> Scc<T> {
     for (&x, x_state) in state.iter() {
         if x_state.rep > edges.len() {
             count += 1;
-            let x_offset = x_state.rep - edges.len() - 1;
-            comps[x_offset] = Some(x);
-            let mut link = x_state.link;
-            let mut i = 1;
-            while let Some(y) = link {
-                comps[x_offset + i] = Some(y);
-                link = state[&y].link;
-                i += 1;
+            let comp_offset = x_state.rep - edges.len() - 1;
+            let comp_members = comps[comp_offset..].iter_mut();
+            let links = successors(x_state.link, |y| state[&y].link);
+            for (member, x) in zip(comp_members, chain([x], links)) {
+                *member = Some(x);
             }
         }
     }
