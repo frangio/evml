@@ -556,8 +556,8 @@ fn size_of(expr: &core::Expr) -> usize {
     }
 }
 
-fn type_check_expr(expr: &core::Expr, env: &HashMap<Id, Type>) -> Result<usize> {
-    use core::*;
+fn type_check_expr(expr: &ast::Expr<Id>, env: &HashMap<Id, Type>) -> Result<usize> {
+    use ast::*;
     let type_check_val = |v: &Val<Id>| -> Result<usize> {
         if let Val::Var(x) = v {
             ensure!(env.get(x).copied() == Some(Type::Val), "variable is not a value");
@@ -579,8 +579,8 @@ fn type_check_expr(expr: &core::Expr, env: &HashMap<Id, Type>) -> Result<usize> 
     }
 }
 
-fn type_check_block(block: &core::Block, mut env: HashMap<Id, Type>) -> Result<()> {
-    use core::*;
+fn type_check_block(block: &ast::Block<Id>, mut env: HashMap<Id, Type>) -> Result<()> {
+    use ast::*;
     for prior in &block.priors {
         match prior {
             BlockPrior::Let(x, e) => {
@@ -618,26 +618,64 @@ fn type_check_block(block: &core::Block, mut env: HashMap<Id, Type>) -> Result<(
     Ok(())
 }
 
-pub fn type_check(block: &core::Block) -> Result<()> {
+pub fn type_check(block: &ast::Block<Id>) -> Result<()> {
     let env = HashMap::new();
     type_check_block(block, env)
 }
 
-fn resolve_val(val: &ast::Val<&str>, env: &HashMap<&str, Id>) -> Result<core::Val> {
+fn elaborate_val(val: ast::Val<Id>) -> core::Val {
+    match val {
+        ast::Val::Const(c) => core::Val::Const(c),
+        ast::Val::Var(x) => core::Val::Var(x),
+    }
+}
+
+fn elaborate_expr(expr: ast::Expr<Id>) -> core::Expr {
+    match expr {
+        ast::Expr::Val(val) => core::Expr::Val(elaborate_val(val)),
+        ast::Expr::Op(op, vals) => {
+            core::Expr::Op(op, vals.into_iter().map(elaborate_val).collect())
+        }
+    }
+}
+
+pub fn elaborate(block: ast::Block<Id>) -> core::Block {
+    let priors = block.priors.into_iter().map(|prior| {
+        match prior {
+            ast::BlockPrior::Let(x, expr) => {
+                core::BlockPrior::Let(x, elaborate_expr(expr))
+            }
+            ast::BlockPrior::LetJoin(k, xs, block) => {
+                core::BlockPrior::LetJoin(k, xs, elaborate(block))
+            }
+        }
+    }).collect();
+
+    let tail = match block.tail {
+        ast::TailExpr::Expr(expr) => core::TailExpr::Expr(elaborate_expr(expr)),
+        ast::TailExpr::Jump(k, xs) => core::TailExpr::Jump(k, xs),
+    };
+
+    core::Block { priors, tail }
+}
+
+fn resolve_val(val: &ast::Val<&str>, env: &HashMap<&str, Id>) -> Result<ast::Val<Id>> {
+    use ast::*;
     Ok(match val {
-        ast::Val::Const(c) => core::Val::Const(*c),
-        ast::Val::Var(x) => {
-            core::Val::Var(*env.get(x).with_context(|| format!("unbound variable {x}"))?)
+        Val::Const(c) => Val::Const(*c),
+        Val::Var(x) => {
+            Val::Var(*env.get(x).with_context(|| format!("unbound variable {x}"))?)
         }
     })
 }
 
-fn resolve_expr(expr: &ast::Expr<&str>, env: &HashMap<&str, Id>) -> Result<core::Expr> {
+fn resolve_expr(expr: &ast::Expr<&str>, env: &HashMap<&str, Id>) -> Result<ast::Expr<Id>> {
+    use ast::*;
     Ok(match expr {
-        ast::Expr::Val(val) => core::Expr::Val(resolve_val(val, env)?),
-        ast::Expr::Op(op, vals) => {
+        Expr::Val(val) => Expr::Val(resolve_val(val, env)?),
+        Expr::Op(op, vals) => {
             let vals = vals.iter().map(|val| resolve_val(val, env)).collect::<Result<_>>()?;
-            core::Expr::Op(*op, vals)
+            Expr::Op(*op, vals)
         }
     })
 }
@@ -646,7 +684,9 @@ fn resolve_block<'a>(
     block: &ast::Block<&'a str>,
     ids: &mut IdGen,
     mut env: HashMap<&'a str, Id>,
-) -> Result<core::Block> {
+) -> Result<ast::Block<Id>> {
+    use ast::*;
+
     let mut priors = Vec::with_capacity(block.priors.len());
 
     for prior in &block.priors {
@@ -658,7 +698,7 @@ fn resolve_block<'a>(
                     env.insert(x, y);
                     y
                 });
-                priors.push(core::BlockPrior::Let(y, expr));
+                priors.push(BlockPrior::Let(y, expr));
             }
 
             BlockPrior::LetJoin(k, xs, block) => {
@@ -671,26 +711,26 @@ fn resolve_block<'a>(
                     y
                 }).collect();
                 let block = resolve_block(block, ids, env)?;
-                priors.push(core::BlockPrior::LetJoin(j, ys, block));
+                priors.push(BlockPrior::LetJoin(j, ys, block));
             }
         }
     }
 
     let tail = match &block.tail {
-        ast::TailExpr::Expr(expr) => core::TailExpr::Expr(resolve_expr(expr, &env)?),
-        ast::TailExpr::Jump(k, xs) => {
+        TailExpr::Expr(expr) => TailExpr::Expr(resolve_expr(expr, &env)?),
+        TailExpr::Jump(k, xs) => {
             let k = *env.get(k).with_context(|| format!("unbound label {k}"))?;
             let xs = xs.iter().map(|x| {
                 env.get(x).copied().with_context(|| format!("unbound variable {x}"))
             }).collect::<Result<_>>()?;
-            core::TailExpr::Jump(k, xs)
+            TailExpr::Jump(k, xs)
         }
     };
 
-    Ok(core::Block { priors, tail })
+    Ok(Block { priors, tail })
 }
 
-pub fn resolve(block: &ast::Block<&str>) -> Result<core::Block> {
+pub fn resolve(block: &ast::Block<&str>) -> Result<ast::Block<Id>> {
     let mut ids = IdGen::new();
     let env = HashMap::new();
     resolve_block(block, &mut ids, env)

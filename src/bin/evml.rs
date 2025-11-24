@@ -1,6 +1,6 @@
 use std::{env, fs::read_to_string};
 use anyhow::{anyhow, Result};
-use evml::{compile, parse, resolve, run, type_check};
+use evml::{compile, elaborate, parse, resolve, run, type_check};
 use revm::{bytecode::Bytecode, primitives::{Bytes, U256}};
 
 fn disasm(code: &[u8]) -> String {
@@ -29,6 +29,7 @@ fn main() -> Result<()> {
     let block = parse(&source)?;
     let block = resolve(&block)?;
     type_check(&block)?;
+    let block = elaborate(block);
     let code = compile(block);
     let asm = disasm(&code);
     let result = run(&code);
