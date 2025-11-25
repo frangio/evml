@@ -1,4 +1,4 @@
-use std::{collections::{hash_map::Entry, HashMap}, hash::Hash, iter::{chain, successors, zip}, mem, ops::Deref};
+use std::{cmp::max, collections::{hash_map::Entry, HashMap}, hash::Hash, iter::{chain, successors, zip}, mem, ops::Deref};
 
 pub struct Edges<T> {
     inner: Vec<(T, T)>,
@@ -54,6 +54,7 @@ impl<T: Copy + Eq> OutEdgeIter<T> {
 pub struct Scc<T> {
     comps: Vec<Option<T>>,
     count: usize,
+    largest: usize,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -65,6 +66,10 @@ pub enum SccEntry<T> {
 impl<T: Copy> Scc<T> {
     pub fn count(&self) -> usize {
         self.count
+    }
+
+    pub fn largest(&self) -> usize {
+        self.largest
     }
 
     pub fn iter(&self) -> impl Iterator<Item = SccEntry<T>> {
@@ -176,20 +181,33 @@ pub fn scc<T: Copy + Ord + Hash>(edges: &Edges<T>) -> Scc<T> {
 
     let mut comps = vec![None; offset];
     let mut count = 0;
+    let mut largest = 0;
+    let mut member_count = 0;
 
     for (&x, x_state) in state.iter() {
         if x_state.rep > edges.len() {
-            count += 1;
             let comp_offset = x_state.rep - edges.len() - 1;
             let comp_members = comps[comp_offset..].iter_mut();
-            let links = successors(x_state.link, |y| state[&y].link);
-            for (member, x) in zip(comp_members, chain([x], links)) {
-                *member = Some(x);
+            let mut links = successors(x_state.link, |y| state[y].link);
+            let mut size = 0;
+
+            for (member, y) in zip(comp_members, chain([x], &mut links)) {
+                assert!(member.is_none());
+                *member = Some(y);
+                size += 1;
             }
+
+            assert!(links.next().is_none());
+
+            count += 1;
+            member_count += size;
+            largest = max(largest, size);
         }
     }
 
-    Scc { comps, count }
+    assert!(count + member_count == comps.len());
+
+    Scc { comps, count, largest }
 }
 
 #[cfg(test)]
