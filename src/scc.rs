@@ -1,4 +1,4 @@
-use std::{cmp::max, collections::{hash_map::Entry, HashMap}, hash::Hash, iter::{chain, successors, zip}, mem, ops::Deref};
+use std::{cmp::max, collections::{hash_map::Entry, HashMap}, convert::identity, hash::Hash, iter::{chain, successors, zip}, mem, ops::Deref};
 
 pub struct Edges<T> {
     inner: Vec<(T, T)>,
@@ -52,48 +52,19 @@ impl<T: Copy + Eq> OutEdgeIter<T> {
 }
 
 pub struct Scc<T> {
-    comps: Vec<Option<T>>,
-    count: usize,
-    largest: usize,
+    pub runs: Vec<Option<T>>,
+    pub count: usize,
+    pub largest: usize,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum SccEntry<T> {
-    Member(usize, T),
-    Done(usize),
-}
-
-impl<T: Copy> Scc<T> {
-    pub fn count(&self) -> usize {
-        self.count
-    }
-
-    pub fn largest(&self) -> usize {
-        self.largest
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = SccEntry<T>> {
-        let mut i = 0;
-        self.comps.iter().map(move |&x| {
-            if let Some(x) = x {
-                SccEntry::Member(i, x)
-            } else {
-                let j = i;
-                i += 1;
-                SccEntry::Done(j)
-            }
-        })
-    }
-}
-
-pub fn scc<T: Copy + Ord + Hash>(edges: &Edges<T>, size_hint: usize) -> Scc<T> {
+pub fn scc<T: Copy + Ord + Hash>(edges: &Edges<T>, vertices: &[T], vertex_capacity: usize) -> Scc<T> {
     struct State<T> {
         rep: usize,
         link: Option<T>,
     }
 
     let mut pre = (0..).into_iter();
-    let mut state = HashMap::with_capacity(size_hint);
+    let mut state = HashMap::with_capacity(vertex_capacity);
     let mut stack = Vec::new();
     let mut sink = None;
     let mut offset = 0;
@@ -179,6 +150,16 @@ pub fn scc<T: Copy + Ord + Hash>(edges: &Edges<T>, size_hint: usize) -> Scc<T> {
         }
     }
 
+    for &v in vertices {
+        if let Entry::Vacant(v_state) = state.entry(v) {
+            v_state.insert(State {
+                rep: edges.len() + 1 + offset,
+                link: None,
+            });
+            offset += 2;
+        }
+    }
+
     let mut comps = vec![None; offset];
     let mut count = 0;
     let mut largest = 0;
@@ -207,7 +188,11 @@ pub fn scc<T: Copy + Ord + Hash>(edges: &Edges<T>, size_hint: usize) -> Scc<T> {
 
     assert!(count + member_count == comps.len());
 
-    Scc { comps, count, largest }
+    Scc { runs: comps, count, largest }
+}
+
+pub fn next_run<T>(iter: &mut impl Iterator<Item = Option<T>>) -> Option<impl Iterator<Item = T>> {
+    iter.next().map(|x| chain([x], iter).filter_map(identity))
 }
 
 #[cfg(test)]
@@ -217,71 +202,64 @@ mod tests {
     #[test]
     fn test_empty() {
         let edges = Edges::<()>::new(vec![]);
-        let result = scc(&edges, 0);
+        let result = scc(&edges, &[], 0);
         assert_eq!(result.count, 0);
-        let entries: Vec<_> = result.iter().collect();
-        assert!(entries.is_empty());
+        assert!(result.runs.is_empty());
     }
 
     #[test]
     fn test_self_loop() {
         let edges = Edges::new(vec![(10, 10)]);
-        let result = scc(&edges, 0);
-        let entries: Vec<_> = result.iter().collect();
-        assert_eq!(entries, vec![SccEntry::Member(0, 10), SccEntry::Done(0)]);
+        let result = scc(&edges, &[], 0);
+        assert_eq!(result.runs, vec![Some(10), None]);
     }
 
     #[test]
     fn test_simple() {
         let edges = Edges::new(vec![(10, 11)]);
-        let result = scc(&edges, 0);
-        let entries: Vec<_> = result.iter().collect();
-        assert_eq!(entries, vec![SccEntry::Member(0, 11), SccEntry::Done(0), SccEntry::Member(1, 10), SccEntry::Done(1)]);
+        let result = scc(&edges, &[], 0);
+        assert_eq!(result.runs, vec![Some(11), None, Some(10), None]);
     }
 
     #[test]
     fn test_cycle_two() {
         let edges = Edges::new(vec![(10, 11), (11, 10)]);
-        let result = scc(&edges, 0);
+        let result = scc(&edges, &[], 0);
         assert_eq!(result.count, 1);
-        let entries: Vec<_> = result.iter().collect();
-        assert_eq!(entries, vec![SccEntry::Member(0, 10), SccEntry::Member(0, 11), SccEntry::Done(0)]);
+        assert_eq!(result.runs, vec![Some(10), Some(11), None]);
     }
 
     #[test]
     fn test_cycle_three() {
         let edges = Edges::new(vec![(10, 11), (11, 12), (12, 10)]);
-        let result = scc(&edges, 0);
+        let result = scc(&edges, &[], 0);
         assert_eq!(result.count, 1);
-        let entries: Vec<_> = result.iter().collect();
-        assert_eq!(entries, vec![SccEntry::Member(0, 10), SccEntry::Member(0, 11), SccEntry::Member(0, 12), SccEntry::Done(0)]);
+        assert_eq!(result.runs, vec![Some(10), Some(11), Some(12), None]);
     }
 
     #[test]
     fn test_chain() {
         let edges = Edges::new(vec![(10, 11), (11, 12), (12, 13)]);
-        let result = scc(&edges, 0);
+        let result = scc(&edges, &[], 0);
         assert_eq!(result.count, 4);
-        let entries: Vec<_> = result.iter().collect();
-        assert_eq!(entries, vec![
-            SccEntry::Member(0, 13), SccEntry::Done(0),
-            SccEntry::Member(1, 12), SccEntry::Done(1),
-            SccEntry::Member(2, 11), SccEntry::Done(2),
-            SccEntry::Member(3, 10), SccEntry::Done(3)
+        assert_eq!(result.runs, vec![
+            Some(13), None,
+            Some(12), None,
+            Some(11), None,
+            Some(10), None
         ]);
     }
 
     #[test]
     fn test_diamond() {
         let edges = Edges::new(vec![(10, 11), (10, 12), (11, 13), (12, 13)]);
-        let result = scc(&edges, 0);
+        let result = scc(&edges, &[], 0);
         assert_eq!(result.count, 4);
-        let entries: Vec<_> = result.iter().collect();
-        assert_eq!(entries, vec![
-            SccEntry::Member(0, 13), SccEntry::Done(0),
-            SccEntry::Member(1, 11), SccEntry::Done(1),
-            SccEntry::Member(2, 12), SccEntry::Done(2),
-            SccEntry::Member(3, 10), SccEntry::Done(3)
+        assert_eq!(result.runs, vec![
+            Some(13), None,
+            Some(11), None,
+            Some(12), None,
+            Some(10), None
         ]);
     }
 
@@ -292,50 +270,89 @@ mod tests {
             (13, 14), (14, 13),
             (12, 13),
         ]);
-        let result = scc(&edges, 0);
+        let result = scc(&edges, &[], 0);
         assert_eq!(result.count, 2);
-        let entries: Vec<_> = result.iter().collect();
-        assert_eq!(entries, vec![
-            SccEntry::Member(0, 13), SccEntry::Member(0, 14), SccEntry::Done(0),
-            SccEntry::Member(1, 10), SccEntry::Member(1, 11), SccEntry::Member(1, 12), SccEntry::Done(1)
+        assert_eq!(result.runs, vec![
+            Some(13), Some(14), None,
+            Some(10), Some(11), Some(12), None
         ]);
     }
 
     #[test]
     fn test_backedge() {
         let edges = Edges::new(vec![(10, 11), (11, 12), (12, 13), (13, 11)]);
-        let result = scc(&edges, 0);
+        let result = scc(&edges, &[], 0);
         assert_eq!(result.count, 2);
-        let entries: Vec<_> = result.iter().collect();
-        assert_eq!(entries, vec![
-            SccEntry::Member(0, 11), SccEntry::Member(0, 12), SccEntry::Member(0, 13), SccEntry::Done(0),
-            SccEntry::Member(1, 10), SccEntry::Done(1)
+        assert_eq!(result.runs, vec![
+            Some(11), Some(12), Some(13), None,
+            Some(10), None
         ]);
     }
 
     #[test]
     fn test_duplicate_edges() {
         let edges = Edges::new(vec![(10, 11), (10, 11), (11, 12), (12, 11), (11, 12)]);
-        let result = scc(&edges, 0);
+        let result = scc(&edges, &[], 0);
         assert_eq!(result.count, 2);
-        let entries: Vec<_> = result.iter().collect();
-        assert_eq!(entries, vec![
-            SccEntry::Member(0, 11), SccEntry::Member(0, 12), SccEntry::Done(0),
-            SccEntry::Member(1, 10), SccEntry::Done(1)
+        assert_eq!(result.runs, vec![
+            Some(11), Some(12), None,
+            Some(10), None
         ]);
     }
 
     #[test]
     fn test_disconnected() {
         let edges = Edges::new(vec![(10, 11), (15, 16)]);
-        let result = scc(&edges, 0);
-        let entries: Vec<_> = result.iter().collect();
+        let result = scc(&edges, &[], 0);
         assert_eq!(result.count, 4);
-        assert_eq!(entries, vec![
-            SccEntry::Member(0, 11), SccEntry::Done(0),
-            SccEntry::Member(1, 10), SccEntry::Done(1),
-            SccEntry::Member(2, 16), SccEntry::Done(2),
-            SccEntry::Member(3, 15), SccEntry::Done(3)
+        assert_eq!(result.runs, vec![
+            Some(11), None,
+            Some(10), None,
+            Some(16), None,
+            Some(15), None
+        ]);
+    }
+
+    #[test]
+    fn test_isolated_vertex() {
+        let edges = Edges::<i32>::new(vec![]);
+        let result = scc(&edges, &[42], 0);
+        assert_eq!(result.count, 1);
+        assert_eq!(result.runs, vec![Some(42), None]);
+    }
+
+    #[test]
+    fn test_isolated_vertices_multiple() {
+        let edges = Edges::<i32>::new(vec![]);
+        let result = scc(&edges, &[10, 20, 30], 0);
+        assert_eq!(result.count, 3);
+        assert_eq!(result.runs, vec![
+            Some(10), None,
+            Some(20), None,
+            Some(30), None
+        ]);
+    }
+
+    #[test]
+    fn test_vertex_already_in_edges() {
+        let edges = Edges::new(vec![(10, 11)]);
+        let result = scc(&edges, &[10, 11], 0);
+        assert_eq!(result.count, 2);
+        assert_eq!(result.runs, vec![
+            Some(11), None,
+            Some(10), None
+        ]);
+    }
+
+    #[test]
+    fn test_mixed_isolated_and_connected() {
+        let edges = Edges::new(vec![(10, 11)]);
+        let result = scc(&edges, &[42], 0);
+        assert_eq!(result.count, 3);
+        assert_eq!(result.runs, vec![
+            Some(11), None,
+            Some(10), None,
+            Some(42), None
         ]);
     }
 }
