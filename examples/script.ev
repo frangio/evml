@@ -1,9 +1,3 @@
 let a = 1;
-join q(y) {
-  @add(a, y)
-}
-join k(x) {
-  let b = @add(a, x);
-  jump q(b)
-}
-jump k(a)
+let b = 2;
+@add(a, b)
