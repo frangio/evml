@@ -115,6 +115,45 @@ pub fn idom<G: DepthFirstPostorder + Predecessors>(g: &G) -> HashMap<G::Node, G:
     idom
 }
 
+pub struct SingletonGraph<T>(pub T);
+
+impl<T: Copy + Eq + Hash> Graph for SingletonGraph<T> {
+    type Node = T;
+    fn node_count(&self) -> usize {
+        1
+    }
+}
+
+impl<T: Copy + Eq + Hash> StartNode for SingletonGraph<T> {
+    fn start(&self) -> Self::Node {
+        self.0
+    }
+}
+
+impl<T: Copy + Eq + Hash> Predecessors for SingletonGraph<T> {
+    fn predecessors(&self, _node: Self::Node) -> impl Iterator<Item = Self::Node> {
+        std::iter::empty()
+    }
+}
+
+impl<T: Copy + Eq + Hash> Successors for SingletonGraph<T> {
+    fn successors(&self, _node: Self::Node) -> impl Iterator<Item = Self::Node> {
+        std::iter::empty()
+    }
+}
+
+impl<T: Copy + Eq + Hash> DepthFirstPostorder for SingletonGraph<T> {
+    fn node(&self, index: usize) -> Self::Node {
+        assert!(index == 0);
+        self.0
+    }
+
+    fn index(&self, node: Self::Node) -> usize {
+        assert!(node == self.0);
+        0
+    }
+}
+
 #[cfg(test)]
 pub mod tests {
     use super::*;

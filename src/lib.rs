@@ -6,11 +6,14 @@ mod scc;
 mod graph;
 mod analysis;
 
-use std::{collections::HashMap, iter::{once, zip}, num::NonZeroUsize};
+use std::{collections::HashMap, iter::{chain, once, zip}, num::NonZeroUsize, slice};
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use revm::{bytecode::opcode, primitives::U256};
 pub use runner::run;
+
+use crate::analysis::{Instruction, Procedure, liveness};
+use crate::graph::{DepthFirstPostorder, SingletonGraph, Successors};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Id(NonZeroUsize);
@@ -260,7 +263,7 @@ fn compile_expr_onto(
 
 fn compile_block(
     block: core::Block,
-    mut liveness: BlockLiveness,
+    mut liveness: &BlockLiveness,
     mut stack: Stack,
 ) -> Vec<asm::Instr> {
     use core::*;
@@ -268,7 +271,8 @@ fn compile_block(
 
     let mut code = vec![];
 
-    for (prior, is_last_use) in zip(block.priors, liveness.iter()) {
+    for (i, prior) in block.priors.into_iter().enumerate() {
+        let is_last_use = |x| liveness[&x].last_use == Some(i);
         match prior {
             BlockPrior::Let(x, e) => {
                 compile_expr_onto(&e, &mut stack, is_last_use, &mut code);
@@ -297,8 +301,8 @@ fn compile_block(
 }
 
 pub fn compile(block: core::Block) -> Vec<asm::Instr> {
-    let liveness = analyze_liveness(&block);
-    compile_block(block, liveness, Stack::new())
+    let analysis = analyze(&block);
+    compile_block(block, &analysis.liveness[&Id::ROOT], Stack::new())
 }
 
 pub fn assemble(code: &[asm::Instr]) -> Vec<u8> {
@@ -316,72 +320,67 @@ pub fn assemble(code: &[asm::Instr]) -> Vec<u8> {
     bytecode
 }
 
-struct BlockLiveness {
-    last_use: Vec<(Id, usize)>,
+struct BlockInstruction<'a> {
+    block: &'a core::Block,
+    index: usize,
 }
 
-impl BlockLiveness {
-    fn iter(&self) -> impl Iterator<Item = impl Fn(Id) -> bool> + use<'_> {
-        let mut next_start = 0;
-        (0..).map(move |block_pos| {
-            let end = self.last_use.len();
-            let mut iter = self.last_use.iter().skip(next_start);
-            let curr_start = iter.position(|&(_, p)| p == block_pos).unwrap_or(end);
-            next_start = iter.position(|&(_, p)| p != block_pos).unwrap_or(end);
-            move |x| self.last_use[curr_start..next_start].iter().any(|&(y, _)| x == y)
+impl Instruction for BlockInstruction<'_> {
+    type VarId = Id;
+
+    fn index(&self) -> usize {
+        self.index
+    }
+
+    fn defs(&self) -> impl Iterator<Item = Self::VarId> {
+        self.block.priors.get(self.index)
+            .and_then(|core::BlockPrior::Let(x, _)| *x)
+            .into_iter()
+    }
+
+    fn uses(&self) -> impl Iterator<Item = Self::VarId> {
+        use core::*;
+        let expr = match self.block.priors.get(self.index) {
+            Some(BlockPrior::Let(_, e)) => e,
+            None => &self.block.tail,
+        };
+        let vals = match expr {
+            Expr::Val(val) => slice::from_ref(val),
+            Expr::Op(_, args) => args,
+        };
+        vals.iter().filter_map(|val| match val {
+            Val::Var(id) => Some(*id),
+            Val::Const(_) => None,
         })
     }
 }
 
-fn analyze_liveness_expr(expr: &core::Expr, block_pos: usize, last_use: &mut HashMap<Id, usize>) {
-    use core::*;
-    let mut analyze_val = |val| {
-        if let &Val::Var(x) = val {
-            last_use.insert(x, block_pos);
-        }
-    };
+impl Procedure for core::Block {
+    type BlockId = Id;
+    type VarId = Id;
 
-    match expr {
-        Expr::Val(val) => analyze_val(val),
-        Expr::Op(_, args) => {
-            for arg in args {
-                analyze_val(arg);
-            }
-        }
+    fn cfg(&self) -> impl DepthFirstPostorder<Node = Self::BlockId> + Successors {
+        SingletonGraph(Id::ROOT)
+    }
+
+    fn instructions(
+        &self,
+        _b: Self::BlockId,
+    ) -> impl DoubleEndedIterator<Item: Instruction<VarId = Self::VarId>> {
+        (0..=self.priors.len()).map(|i| BlockInstruction { block: self, index: i })
     }
 }
 
-fn analyze_liveness_block(block: &core::Block) -> BlockLiveness {
-    use core::*;
-    let mut last_use = HashMap::new();
+type Liveness = analysis::Liveness<core::Block>;
+type BlockLiveness = analysis::BlockLiveness<core::Block>;
 
-    for (block_pos, prior) in block.priors.iter().enumerate() {
-        match prior {
-            BlockPrior::Let(x, expr) => {
-                if let Some(x) = x {
-                    let other_pos = last_use.insert(*x, block_pos);
-                    assert!(other_pos.is_none());
-                }
-                analyze_liveness_expr(expr, block_pos, &mut last_use);
-            }
-
-        }
-    }
-
-    let tail_pos = block.priors.len();
-    analyze_liveness_expr(&block.tail, tail_pos, &mut last_use);
-
-    let mut last_use = Vec::from_iter(last_use);
-    last_use.sort_unstable_by(|(_, i), (_, j)| i.cmp(j));
-
-    BlockLiveness { last_use }
+struct Analysis {
+    liveness: Liveness,
 }
 
-fn analyze_liveness(block: &core::Block) -> BlockLiveness {
-    analyze_liveness_block(block)
-}
-
-fn analyze(block: &core::Block) {
+fn analyze(block: &core::Block) -> Analysis {
+    let liveness = liveness(block);
+    Analysis { liveness }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
