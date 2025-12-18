@@ -70,6 +70,19 @@ pub mod core {
     }
 }
 
+pub mod asm {
+    use super::Id;
+    use revm::primitives::U256;
+
+    pub enum Instr {
+        Pop,
+        Push(U256),
+        Swap(usize),
+        Dup(usize),
+        Op(u8),
+    }
+}
+
 pub mod ast {
     use revm::primitives::U256;
 
@@ -175,22 +188,23 @@ fn compile_val_onto(
     val: &core::Val,
     stack: &mut Stack,
     should_swap: impl Fn(&StackEntry) -> bool,
-    code: &mut Vec<u8>,
+    code: &mut Vec<asm::Instr>,
 ) {
     use core::*;
+    use asm::*;
     match val {
         Val::Const(c) => {
-            code.extend(instruction_push(c.to_be_bytes::<32>()));
+            code.push(Instr::Push(*c));
         }
 
         Val::Var(x) => {
             let mut entry = stack.entry(*x);
             let depth = entry.depth();
             if !should_swap(&entry) {
-                code.push(opcode_dup(depth));
+                code.push(Instr::Dup(depth));
             } else {
                 if depth > 0 {
-                    code.push(opcode_swap(depth));
+                    code.push(Instr::Swap(depth));
                     entry.swap();
                 }
                 stack.popn(1);
@@ -203,9 +217,10 @@ fn compile_expr_onto(
     expr: &core::Expr,
     stack: &mut Stack,
     is_last_use: impl Fn(Id) -> bool,
-    code: &mut Vec<u8>,
+    code: &mut Vec<asm::Instr>,
 ) {
     use core::*;
+    use asm::*;
     match expr {
         Expr::Val(val) => {
             compile_val_onto(val, stack, |e| is_last_use(e.var()), code);
@@ -232,30 +247,26 @@ fn compile_expr_onto(
                 let rem_delta = target_stack_len - stack.len();
                 let offset = i - rem_delta;
                 if offset > 0 {
-                    code.push(opcode_swap(offset));
+                    code.push(Instr::Swap(offset));
                     stack.swap(offset);
                 }
             }
 
-            code.push(*op);
+            code.push(Instr::Op(*op));
             stack.popn(args.len());
         }
     }
-}
-
-struct BlockCode {
-    code: Vec<u8>,
-    refs: Vec<(usize, Id)>,
 }
 
 fn compile_block(
     block: core::Block,
     mut liveness: BlockLiveness,
     mut stack: Stack,
-) -> BlockCode {
+) -> Vec<asm::Instr> {
     use core::*;
+    use asm::*;
+
     let mut code = vec![];
-    let mut refs = vec![];
 
     for (prior, is_last_use) in zip(block.priors, liveness.iter()) {
         match prior {
@@ -274,76 +285,35 @@ fn compile_block(
     if excess > 0 {
         let ret = size_of(&block.tail);
         for _ in 0..ret {
-            code.push(opcode_swap(excess));
-            code.push(opcode::POP);
+            code.push(Instr::Swap(excess));
+            code.push(Instr::Pop);
         }
         if excess > ret {
-            code.resize(code.len() + excess - ret, opcode::POP);
+            code.resize_with(code.len() + excess - ret, || Instr::Pop);
         }
-    }
-
-    BlockCode { code, refs }
-}
-
-pub fn compile(block: core::Block) -> Vec<u8> {
-    let liveness = analyze_liveness(&block);
-    let entry = compile_block(block, liveness, Stack::new());
-
-    link(entry, vec![])
-}
-
-fn link_block(
-    block: &BlockCode,
-    locs: &HashMap<Id, usize>,
-    pending_refs: &mut Vec<(usize, Id)>,
-    code: &mut Vec<u8>,
-) {
-    let mut start = 0;
-    for &(pos, j) in &block.refs {
-        code.extend(&block.code[start..pos]);
-        start = pos + 1;
-        assert!(block.code[pos..pos + 2] == [opcode::CODESIZE, opcode::JUMP]);
-        match locs.get(&j) {
-            Some(x) => {
-                code.extend(instruction_push(x.to_be_bytes()))
-            }
-            None => {
-                pending_refs.push((code.len(), j));
-                code.extend([opcode::PUSH2, 0, 0]);
-            }
-        }
-    }
-    code.extend(&block.code[start..]);
-}
-
-fn link(entry: BlockCode, blocks: Vec<(Id, BlockCode)>) -> Vec<u8> {
-    let mut locs: HashMap<Id, usize> = HashMap::new();
-    let mut code = Vec::new();
-    let mut pending_refs = Vec::new();
-
-    link_block(&entry, &locs, &mut pending_refs, &mut code);
-
-    for (k, block) in blocks {
-        if let Some((pos, _)) = pending_refs.pop_if(|(pos, j)| *j == k && *pos + 4 == code.len()) {
-            assert!(code[pos..] == [opcode::PUSH2, 0, 0, opcode::JUMP]);
-            code.truncate(pos);
-        }
-
-        let other_loc = locs.insert(k, code.len());
-        assert!(other_loc.is_none(), "duplicate id");
-
-        code.push(opcode::JUMPDEST);
-
-        link_block(&block, &locs, &mut pending_refs, &mut code);
-    }
-
-    for (pos, j) in pending_refs {
-        assert!(code[pos..pos + 4] == [opcode::PUSH2, 0, 0, opcode::JUMP]);
-        let x = locs.get(&j).unwrap();
-        code[pos + 1..pos + 2].copy_from_slice(&x.to_be_bytes());
     }
 
     code
+}
+
+pub fn compile(block: core::Block) -> Vec<asm::Instr> {
+    let liveness = analyze_liveness(&block);
+    compile_block(block, liveness, Stack::new())
+}
+
+pub fn assemble(code: &[asm::Instr]) -> Vec<u8> {
+    use asm::Instr::*;
+    let mut bytecode = Vec::with_capacity(code.len());
+    for instr in code {
+        match instr {
+            Pop => bytecode.push(opcode::POP),
+            Push(value) => bytecode.extend(instruction_push(value.to_be_bytes::<32>())),
+            Swap(depth) => bytecode.push(opcode_swap(*depth)),
+            Dup(depth) => bytecode.push(opcode_dup(*depth)),
+            Op(op) => bytecode.push(*op),
+        }
+    }
+    bytecode
 }
 
 struct BlockLiveness {
@@ -409,6 +379,9 @@ fn analyze_liveness_block(block: &core::Block) -> BlockLiveness {
 
 fn analyze_liveness(block: &core::Block) -> BlockLiveness {
     analyze_liveness_block(block)
+}
+
+fn analyze(block: &core::Block) {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -648,8 +621,8 @@ mod tests {
             priors: vec![],
             tail: Val(Const(U256::from(42))),
         };
-        let bytecode = compile(block);
-        let stack = run(&bytecode).expect("execution failed");
+        let code = compile(block);
+        let stack = run(&assemble(&code)).expect("execution failed");
         assert_eq!(stack, vec![U256::from(42)]);
     }
 
@@ -660,8 +633,8 @@ mod tests {
             priors: vec![],
             tail: Op(0x04, vec![Const(U256::from(84)), Const(U256::from(2))]),
         };
-        let bytecode = compile(block);
-        let stack = run(&bytecode).expect("execution failed");
+        let code = compile(block);
+        let stack = run(&assemble(&code)).expect("execution failed");
         assert_eq!(stack, vec![U256::from(42)]);
     }
 
@@ -674,8 +647,8 @@ mod tests {
             ],
             tail: Op(0x04, vec![Const(U256::from(84)), Var(id!(1))]),
         };
-        let bytecode = compile(block);
-        let stack = run(&bytecode).expect("execution failed");
+        let code = compile(block);
+        let stack = run(&assemble(&code)).expect("execution failed");
         assert_eq!(stack, vec![U256::from(42)]);
     }
 
@@ -688,8 +661,8 @@ mod tests {
             ],
             tail: Val(Var(id!(1))),
         };
-        let bytecode = compile(block);
-        let stack = run(&bytecode).expect("execution failed");
+        let code = compile(block);
+        let stack = run(&assemble(&code)).expect("execution failed");
         assert_eq!(stack, vec![U256::from(42)]);
     }
 
@@ -702,8 +675,8 @@ mod tests {
             ],
             tail: Op(0x04, vec![Var(id!(1)), Var(id!(1))]),
         };
-        let bytecode = compile(block);
-        let stack = run(&bytecode).expect("execution failed");
+        let code = compile(block);
+        let stack = run(&assemble(&code)).expect("execution failed");
         assert_eq!(stack, vec![U256::from(1)]);
     }
 
@@ -717,8 +690,8 @@ mod tests {
             ],
             tail: Val(Const(U256::from(42))),
         };
-        let bytecode = compile(block);
-        let stack = run(&bytecode).expect("execution failed");
+        let code = compile(block);
+        let stack = run(&assemble(&code)).expect("execution failed");
         assert_eq!(stack, vec![U256::from(42)]);
     }
 
