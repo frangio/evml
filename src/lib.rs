@@ -45,6 +45,30 @@ impl IdGen {
     }
 }
 
+pub mod ast {
+    use revm::primitives::U256;
+
+    #[derive(PartialEq, Eq)]
+    pub enum Val<T> {
+        Const(U256),
+        Var(T),
+    }
+
+    pub enum Expr<T> {
+        Val(Val<T>),
+        Op(u8, Vec<Val<T>>),
+    }
+
+    pub enum BlockPrior<T> {
+        Let(Option<T>, Expr<T>),
+    }
+
+    pub struct Block<T> {
+        pub priors: Vec<BlockPrior<T>>,
+        pub tail: Expr<T>,
+    }
+}
+
 pub mod core {
     use super::Id;
     use revm::primitives::U256;
@@ -80,30 +104,6 @@ pub mod asm {
         Swap(usize),
         Dup(usize),
         Op(u8),
-    }
-}
-
-pub mod ast {
-    use revm::primitives::U256;
-
-    #[derive(PartialEq, Eq)]
-    pub enum Val<T> {
-        Const(U256),
-        Var(T),
-    }
-
-    pub enum Expr<T> {
-        Val(Val<T>),
-        Op(u8, Vec<Val<T>>),
-    }
-
-    pub enum BlockPrior<T> {
-        Let(Option<T>, Expr<T>),
-    }
-
-    pub struct Block<T> {
-        pub priors: Vec<BlockPrior<T>>,
-        pub tail: Expr<T>,
     }
 }
 
