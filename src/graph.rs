@@ -1,4 +1,4 @@
-use std::{collections::{HashMap, HashSet}, hash::Hash, num::NonZero};
+use std::{borrow::Borrow, collections::{HashMap, HashSet}, hash::Hash, num::NonZero};
 
 pub trait Graph {
     type Node: Copy + Eq + Hash;
@@ -11,18 +11,57 @@ pub trait StartNode: Graph {
 
 pub trait Predecessors: Graph {
     fn predecessors(&self, node: Self::Node) -> impl Iterator<Item = Self::Node>;
+    fn predecessors_indices(&self, index: usize) -> impl Iterator<Item = usize>
+    where Self: DepthFirstPostorder {
+        self.predecessors(self.node(index)).map(|u| self.index(u))
+    }
 }
 
 pub trait Successors: Graph {
     fn successors(&self, node: Self::Node) -> impl Iterator<Item = Self::Node>;
+    fn successors_indices(&self, index: usize) -> impl Iterator<Item = usize>
+    where Self: DepthFirstPostorder {
+        self.successors(self.node(index)).map(|u| self.index(u))
+    }
 }
 
 pub trait DepthFirstPostorder: Graph + StartNode {
     fn node(&self, index: usize) -> Self::Node;
-    fn predecessors_indices(&self, index: usize) -> impl Iterator<Item = usize>
-    where Self: Predecessors;
-    fn successors_indices(&self, index: usize) -> impl Iterator<Item = usize>
-    where Self: Successors;
+    fn index(&self, node: Self::Node) -> usize;
+}
+
+impl<G: Graph + ?Sized> Graph for &G {
+    type Node = G::Node;
+    fn node_count(&self) -> usize {
+        (*self).node_count()
+    }
+}
+
+impl<G: StartNode + ?Sized> StartNode for &G {
+    fn start(&self) -> Self::Node {
+        (*self).start()
+    }
+}
+
+impl<G: Predecessors + ?Sized> Predecessors for &G {
+    fn predecessors(&self, node: Self::Node) -> impl Iterator<Item = Self::Node> {
+        (*self).predecessors(node)
+    }
+}
+
+impl<G: Successors + ?Sized> Successors for &G {
+    fn successors(&self, node: Self::Node) -> impl Iterator<Item = Self::Node> {
+        (*self).successors(node)
+    }
+}
+
+impl<G: DepthFirstPostorder + ?Sized> DepthFirstPostorder for &G {
+    fn node(&self, index: usize) -> Self::Node {
+        G::node(*self, index)
+    }
+    fn index(&self, node: Self::Node) -> usize {
+        G::index(*self, node)
+    }
 }
 
 pub fn idom<G: DepthFirstPostorder + Predecessors>(g: &G) -> HashMap<G::Node, G::Node> {
@@ -76,71 +115,17 @@ pub fn idom<G: DepthFirstPostorder + Predecessors>(g: &G) -> HashMap<G::Node, G:
     idom
 }
 
-#[derive(Clone, Copy)]
-pub struct Instruction<'a, T> {
-    pub defs: &'a [T],
-    pub uses: &'a [T],
-}
-
-pub trait Procedure {
-    type BlockId: Copy + Eq + Hash;
-    type VarId: Copy + Eq + Hash;
-    fn cfg(&self) -> impl DepthFirstPostorder<Node = Self::BlockId> + Successors;
-    fn instructions(
-        &self,
-        b: Self::BlockId,
-    ) -> impl DoubleEndedIterator<Item = Instruction<'_, Self::VarId>> + ExactSizeIterator;
-}
-
-/// Returns the last use instruction index for each live variable per block.
-/// `None` means the variable is live-out.
-pub fn liveness<P: Procedure>(proc: &P) -> HashMap<P::BlockId, HashMap<P::VarId, Option<usize>>> {
-    let cfg = proc.cfg();
-    let n = cfg.node_count();
-
-    let mut result: HashMap<P::BlockId, HashMap<P::VarId, Option<usize>>> = HashMap::with_capacity(n);
-
-    for i in 0..n {
-        let block = cfg.node(i);
-        let mut live = HashMap::new();
-
-        for j in cfg.successors_indices(i) {
-            if j < i {
-                for &x in result[&cfg.node(j)].keys() {
-                    live.insert(x, None);
-                }
-            } else {
-                unimplemented!("cycles");
-            }
-        }
-
-        for (i, instr) in proc.instructions(block).enumerate().rev() {
-            for &x in instr.uses {
-                live.insert(x, Some(i));
-            }
-
-            for &x in instr.defs {
-                live.entry(x).or_insert(Some(i));
-            }
-        }
-
-        result.insert(block, live);
-    }
-
-    result
-}
-
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
 
-    struct TestGraph<T> {
+    pub struct TestGraph<T> {
         edges: Vec<(T, T)>,
         postorder: Vec<T>,
     }
 
     impl<T: Copy + Eq + Hash> TestGraph<T> {
-        fn new(start: T, edges: &[(T, T)]) -> Self {
+        pub fn new(start: T, edges: &[(T, T)]) -> Self {
             let edges = edges.to_vec();
             let mut postorder = vec![];
             let mut visited: HashSet<T> = HashSet::new();
@@ -159,10 +144,6 @@ mod tests {
             }
 
             Self { edges, postorder }
-        }
-
-        fn index(&self, node: T) -> usize {
-            self.postorder.iter().position(|&n| n == node).unwrap()
         }
     }
 
@@ -196,14 +177,8 @@ mod tests {
             self.postorder[index]
         }
 
-        fn predecessors_indices(&self, index: usize) -> impl Iterator<Item = usize> {
-            let node = self.node(index);
-            self.predecessors(node).map(|u| self.index(u))
-        }
-
-        fn successors_indices(&self, index: usize) -> impl Iterator<Item = usize> {
-            let node = self.node(index);
-            self.successors(node).map(|u| self.index(u))
+        fn index(&self, node: T) -> usize {
+            self.postorder.iter().position(|&n| n == node).unwrap()
         }
     }
 
@@ -294,121 +269,5 @@ mod tests {
         let result = idom(&g);
         assert_eq!(result["B"], "A");
         assert_eq!(result["C"], "A");
-    }
-
-    struct TestProcedure<B, V: 'static> {
-        cfg: TestGraph<B>,
-        instructions: HashMap<B, &'static [Instruction<'static, V>]>,
-    }
-
-    impl<B: Copy + Eq + Hash, V> TestProcedure<B, V> {
-        fn new(
-            start: B,
-            edges: &[(B, B)],
-            instructions: &[(B, &'static [Instruction<'static, V>])],
-        ) -> Self {
-            let cfg = TestGraph::new(start, edges);
-            let instructions = instructions.iter().copied().collect();
-            Self { cfg, instructions }
-        }
-    }
-
-    impl<B: Copy + Eq + Hash, V: Copy + Eq + Hash> Procedure for TestProcedure<B, V> {
-        type BlockId = B;
-        type VarId = V;
-
-        fn cfg(&self) -> impl DepthFirstPostorder<Node = Self::BlockId> + Successors {
-            TestGraph::new(self.cfg.start(), &self.cfg.edges)
-        }
-
-        fn instructions(
-            &self,
-            b: Self::BlockId,
-        ) -> impl DoubleEndedIterator<Item = Instruction<'_, Self::VarId>> + ExactSizeIterator {
-            self.instructions.get(&b).copied().unwrap_or(&[]).iter().copied()
-        }
-    }
-
-    macro_rules! instructions {
-        ($($(def [$($d:literal),*])? $(use [$($u:literal),*])?);*) => {
-            &[$(Instruction { defs: &[$($($d),*)?], uses: &[$($($u),*)?] }),*]
-        };
-    }
-
-    #[test]
-    fn test_live_in_single_block() {
-        // A: use x
-        let proc = TestProcedure::new("A", &[], &[
-            ("A", instructions! { use ["x"] }),
-        ]);
-        let result = liveness(&proc);
-        assert_eq!(result["A"], HashMap::from([("x", Some(0))]));
-    }
-
-    #[test]
-    fn test_live_in_linear() {
-        // A: use x  →  B: use y
-        let proc = TestProcedure::new("A", &[("A", "B")], &[
-            ("A", instructions! { use ["x"] }),
-            ("B", instructions! { use ["y"] }),
-        ]);
-        let result = liveness(&proc);
-        assert_eq!(result["A"], HashMap::from([("x", Some(0)), ("y", None)]));
-        assert_eq!(result["B"], HashMap::from([("y", Some(0))]));
-    }
-
-    #[test]
-    fn test_live_in_diamond() {
-        //     A
-        //    / \
-        //   B   C
-        //    \ /
-        //     D: use x
-        let proc = TestProcedure::new("A", &[
-            ("A", "B"), ("A", "C"),
-            ("B", "D"), ("C", "D"),
-        ], &[
-            ("D", instructions! { use ["x"] }),
-        ]);
-        let result = liveness(&proc);
-        assert_eq!(result["A"], HashMap::from([("x", None)]));
-        assert_eq!(result["B"], HashMap::from([("x", None)]));
-        assert_eq!(result["C"], HashMap::from([("x", None)]));
-        assert_eq!(result["D"], HashMap::from([("x", Some(0))]));
-    }
-
-    #[test]
-    fn test_live_in_def_kills() {
-        // A: def x  →  B: use x
-        let proc = TestProcedure::new("A", &[("A", "B")], &[
-            ("A", instructions! { def ["x"] }),
-            ("B", instructions! { use ["x"] }),
-        ]);
-        let result = liveness(&proc);
-        assert_eq!(result["A"], HashMap::from([("x", None)]));
-        assert_eq!(result["B"], HashMap::from([("x", Some(0))]));
-    }
-
-    #[test]
-    fn test_live_in_def_before_use() {
-        // A: def x; use x
-        let proc = TestProcedure::new("A", &[], &[
-            ("A", instructions! { def ["x"] use []; use ["x"] }),
-        ]);
-        let result = liveness(&proc);
-        assert_eq!(result["A"], HashMap::from([("x", Some(1))]));
-    }
-
-    #[test]
-    fn test_live_in_use_not_propagated_past_successor() {
-        // A: def x  →  B: use x  →  C
-        let proc = TestProcedure::new("A", &[("A", "B"), ("B", "C")], &[
-            ("A", instructions! { def ["x"] }),
-            ("B", instructions! { use ["x"] }),
-        ]);
-        let result = liveness(&proc);
-        assert_eq!(result["A"], HashMap::from([("x", None)]));
-        assert_eq!(result["B"], HashMap::from([("x", Some(0))]));
-        assert_eq!(result["C"], HashMap::from([]));
     }
 }

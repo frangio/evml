@@ -4,6 +4,7 @@ mod runner;
 mod opcodes;
 mod scc;
 mod graph;
+mod analysis;
 
 use std::{collections::HashMap, iter::{once, zip}, num::NonZeroUsize};
 
