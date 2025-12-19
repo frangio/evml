@@ -1,6 +1,6 @@
 use std::{env, fs::read_to_string};
 use anyhow::{anyhow, Result};
-use evml::{compile, elaborate, assemble, parse, resolve, run, type_check};
+use evml::{compile, lower, assemble, parse, resolve, run, type_check};
 use revm::{bytecode::Bytecode, primitives::{Bytes, U256}};
 
 fn disasm(code: &[u8]) -> String {
@@ -27,11 +27,11 @@ fn main() -> Result<()> {
     let script_path = env::args().nth(1).ok_or(anyhow!("missing script argument"))?;
     let source = read_to_string(script_path)?;
 
-    let block = parse(&source)?;
-    let block = resolve(&block)?;
-    type_check(&block)?;
-    let block = elaborate(block);
-    let code = compile(block);
+    let ast = parse(&source)?;
+    let ast = resolve(&ast)?;
+    type_check(&ast)?;
+    let ir = lower(ast);
+    let code = compile(ir);
     let bytecode = assemble(&code);
 
     let asm = disasm(&bytecode);

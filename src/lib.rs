@@ -444,32 +444,32 @@ pub fn type_check(block: &ast::Block<Id>) -> Result<()> {
     type_check_block(block, env)
 }
 
-fn elaborate_val(val: ast::Val<Id>) -> core::Val {
+fn lower_val(val: ast::Val<Id>) -> core::Val {
     match val {
         ast::Val::Const(c) => core::Val::Const(c),
         ast::Val::Var(x) => core::Val::Var(x),
     }
 }
 
-fn elaborate_expr(expr: ast::Expr<Id>) -> core::Expr {
+fn lower_expr(expr: ast::Expr<Id>) -> core::Expr {
     match expr {
-        ast::Expr::Val(val) => core::Expr::Val(elaborate_val(val)),
+        ast::Expr::Val(val) => core::Expr::Val(lower_val(val)),
         ast::Expr::Op(op, vals) => {
-            core::Expr::Op(op, vals.into_iter().map(elaborate_val).collect())
+            core::Expr::Op(op, vals.into_iter().map(lower_val).collect())
         }
     }
 }
 
-pub fn elaborate(block: ast::Block<Id>) -> core::Block {
+pub fn lower(block: ast::Block<Id>) -> core::Block {
     let priors = block.priors.into_iter().map(|prior| {
         match prior {
             ast::BlockPrior::Let(x, expr) => {
-                core::BlockPrior::Let(x, elaborate_expr(expr))
+                core::BlockPrior::Let(x, lower_expr(expr))
             }
         }
     }).collect();
 
-    let tail = elaborate_expr(block.tail);
+    let tail = lower_expr(block.tail);
 
     core::Block { priors, tail }
 }
