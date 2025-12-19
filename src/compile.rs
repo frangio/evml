@@ -68,33 +68,48 @@ impl StackEntry<'_> {
     }
 }
 
-fn compile_val_onto(
-    val: &core::Val,
-    stack: &mut Stack,
-    should_swap: impl Fn(&StackEntry) -> bool,
-    code: &mut Vec<asm::Instr>,
-) {
+pub fn compile(block: core::Block) -> Vec<asm::Instr> {
+    let analysis = analyze(&block);
+    compile_block(block, &analysis.liveness[&Id::ROOT], Stack::new())
+}
+
+fn compile_block(
+    block: core::Block,
+    mut liveness: &BlockLiveness,
+    mut stack: Stack,
+) -> Vec<asm::Instr> {
     use core::*;
     use asm::*;
-    match val {
-        Val::Const(c) => {
-            code.push(Instr::Push(*c));
-        }
 
-        Val::Var(x) => {
-            let mut entry = stack.entry(*x);
-            let depth = entry.depth();
-            if !should_swap(&entry) {
-                code.push(Instr::Dup(depth));
-            } else {
-                if depth > 0 {
-                    code.push(Instr::Swap(depth));
-                    entry.swap();
+    let mut code = vec![];
+
+    for (i, prior) in block.priors.into_iter().enumerate() {
+        let is_last_use = |x| liveness[&x].last_use == Some(i);
+        match prior {
+            BlockPrior::Let(x, e) => {
+                compile_expr_onto(&e, &mut stack, is_last_use, &mut code);
+                if let Some(x) = x {
+                    stack.push(Some(x));
                 }
-                stack.popn(1);
             }
+
         }
     }
+
+    compile_expr_onto(&block.tail, &mut stack, |_| true, &mut code);
+    let excess = stack.len();
+    if excess > 0 {
+        let ret = size_of(&block.tail);
+        for _ in 0..ret {
+            code.push(Instr::Swap(excess));
+            code.push(Instr::Pop);
+        }
+        if excess > ret {
+            code.resize_with(code.len() + excess - ret, || Instr::Pop);
+        }
+    }
+
+    code
 }
 
 fn compile_expr_onto(
@@ -142,48 +157,33 @@ fn compile_expr_onto(
     }
 }
 
-fn compile_block(
-    block: core::Block,
-    mut liveness: &BlockLiveness,
-    mut stack: Stack,
-) -> Vec<asm::Instr> {
+fn compile_val_onto(
+    val: &core::Val,
+    stack: &mut Stack,
+    should_swap: impl Fn(&StackEntry) -> bool,
+    code: &mut Vec<asm::Instr>,
+) {
     use core::*;
     use asm::*;
+    match val {
+        Val::Const(c) => {
+            code.push(Instr::Push(*c));
+        }
 
-    let mut code = vec![];
-
-    for (i, prior) in block.priors.into_iter().enumerate() {
-        let is_last_use = |x| liveness[&x].last_use == Some(i);
-        match prior {
-            BlockPrior::Let(x, e) => {
-                compile_expr_onto(&e, &mut stack, is_last_use, &mut code);
-                if let Some(x) = x {
-                    stack.push(Some(x));
+        Val::Var(x) => {
+            let mut entry = stack.entry(*x);
+            let depth = entry.depth();
+            if !should_swap(&entry) {
+                code.push(Instr::Dup(depth));
+            } else {
+                if depth > 0 {
+                    code.push(Instr::Swap(depth));
+                    entry.swap();
                 }
+                stack.popn(1);
             }
-
         }
     }
-
-    compile_expr_onto(&block.tail, &mut stack, |_| true, &mut code);
-    let excess = stack.len();
-    if excess > 0 {
-        let ret = size_of(&block.tail);
-        for _ in 0..ret {
-            code.push(Instr::Swap(excess));
-            code.push(Instr::Pop);
-        }
-        if excess > ret {
-            code.resize_with(code.len() + excess - ret, || Instr::Pop);
-        }
-    }
-
-    code
-}
-
-pub fn compile(block: core::Block) -> Vec<asm::Instr> {
-    let analysis = analyze(&block);
-    compile_block(block, &analysis.liveness[&Id::ROOT], Stack::new())
 }
 
 struct BlockInstruction<'a> {

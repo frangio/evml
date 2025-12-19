@@ -109,6 +109,21 @@ pub mod asm {
     }
 }
 
+pub fn assemble(code: &[asm::Instr]) -> Vec<u8> {
+    use asm::Instr::*;
+    let mut bytecode = Vec::with_capacity(code.len());
+    for instr in code {
+        match instr {
+            Pop => bytecode.push(opcode::POP),
+            Push(value) => bytecode.extend(instruction_push(value.to_be_bytes::<32>())),
+            Swap(depth) => bytecode.push(opcode_swap(*depth)),
+            Dup(depth) => bytecode.push(opcode_dup(*depth)),
+            Op(op) => bytecode.push(*op),
+        }
+    }
+    bytecode
+}
+
 fn opcode_swap(depth: usize) -> u8 {
     assert!(depth > 0, "can't swap top of stack");
     assert!(depth <= 16, "stack too deep");
@@ -130,24 +145,34 @@ fn instruction_push<const N: usize>(value: [u8; N]) -> impl Iterator<Item = u8> 
     once(opcode::PUSH0 + size as u8).chain(value)
 }
 
-pub fn assemble(code: &[asm::Instr]) -> Vec<u8> {
-    use asm::Instr::*;
-    let mut bytecode = Vec::with_capacity(code.len());
-    for instr in code {
-        match instr {
-            Pop => bytecode.push(opcode::POP),
-            Push(value) => bytecode.extend(instruction_push(value.to_be_bytes::<32>())),
-            Swap(depth) => bytecode.push(opcode_swap(*depth)),
-            Dup(depth) => bytecode.push(opcode_dup(*depth)),
-            Op(op) => bytecode.push(*op),
-        }
-    }
-    bytecode
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Type {
     Val,
+}
+
+pub fn type_check(block: &ast::Block<Id>) -> Result<()> {
+    let env = HashMap::new();
+    type_check_block(block, env)
+}
+
+fn type_check_block(block: &ast::Block<Id>, mut env: HashMap<Id, Type>) -> Result<()> {
+    use ast::*;
+    for prior in &block.priors {
+        match prior {
+            BlockPrior::Let(x, e) => {
+                let outputs = type_check_expr(e, &env)?;
+                ensure!(outputs == x.iter().count(), "void operation can't be assigned");
+                if let Some(x) = x {
+                    env.insert(*x, Type::Val);
+                }
+            }
+
+        }
+    }
+
+    type_check_expr(&block.tail, &env)?;
+
+    Ok(())
 }
 
 fn type_check_expr(expr: &ast::Expr<Id>, env: &HashMap<Id, Type>) -> Result<usize> {
@@ -173,47 +198,6 @@ fn type_check_expr(expr: &ast::Expr<Id>, env: &HashMap<Id, Type>) -> Result<usiz
     }
 }
 
-fn type_check_block(block: &ast::Block<Id>, mut env: HashMap<Id, Type>) -> Result<()> {
-    use ast::*;
-    for prior in &block.priors {
-        match prior {
-            BlockPrior::Let(x, e) => {
-                let outputs = type_check_expr(e, &env)?;
-                ensure!(outputs == x.iter().count(), "void operation can't be assigned");
-                if let Some(x) = x {
-                    env.insert(*x, Type::Val);
-                }
-            }
-
-        }
-    }
-
-    type_check_expr(&block.tail, &env)?;
-
-    Ok(())
-}
-
-pub fn type_check(block: &ast::Block<Id>) -> Result<()> {
-    let env = HashMap::new();
-    type_check_block(block, env)
-}
-
-fn lower_val(val: ast::Val<Id>) -> core::Val {
-    match val {
-        ast::Val::Const(c) => core::Val::Const(c),
-        ast::Val::Var(x) => core::Val::Var(x),
-    }
-}
-
-fn lower_expr(expr: ast::Expr<Id>) -> core::Expr {
-    match expr {
-        ast::Expr::Val(val) => core::Expr::Val(lower_val(val)),
-        ast::Expr::Op(op, vals) => {
-            core::Expr::Op(op, vals.into_iter().map(lower_val).collect())
-        }
-    }
-}
-
 pub fn lower(block: ast::Block<Id>) -> core::Block {
     let priors = block.priors.into_iter().map(|prior| {
         match prior {
@@ -228,25 +212,26 @@ pub fn lower(block: ast::Block<Id>) -> core::Block {
     core::Block { priors, tail }
 }
 
-fn resolve_val(val: &ast::Val<&str>, env: &HashMap<&str, Id>) -> Result<ast::Val<Id>> {
-    use ast::*;
-    Ok(match val {
-        Val::Const(c) => Val::Const(*c),
-        Val::Var(x) => {
-            Val::Var(*env.get(x).with_context(|| format!("unbound variable {x}"))?)
+fn lower_expr(expr: ast::Expr<Id>) -> core::Expr {
+    match expr {
+        ast::Expr::Val(val) => core::Expr::Val(lower_val(val)),
+        ast::Expr::Op(op, vals) => {
+            core::Expr::Op(op, vals.into_iter().map(lower_val).collect())
         }
-    })
+    }
 }
 
-fn resolve_expr(expr: &ast::Expr<&str>, env: &HashMap<&str, Id>) -> Result<ast::Expr<Id>> {
-    use ast::*;
-    Ok(match expr {
-        Expr::Val(val) => Expr::Val(resolve_val(val, env)?),
-        Expr::Op(op, vals) => {
-            let vals = vals.iter().map(|val| resolve_val(val, env)).collect::<Result<_>>()?;
-            Expr::Op(*op, vals)
-        }
-    })
+fn lower_val(val: ast::Val<Id>) -> core::Val {
+    match val {
+        ast::Val::Const(c) => core::Val::Const(c),
+        ast::Val::Var(x) => core::Val::Var(x),
+    }
+}
+
+pub fn resolve(block: &ast::Block<&str>) -> Result<ast::Block<Id>> {
+    let mut ids = IdGen::new();
+    let env = HashMap::new();
+    resolve_block(block, &mut ids, env)
 }
 
 fn resolve_block<'a>(
@@ -278,10 +263,25 @@ fn resolve_block<'a>(
     Ok(Block { priors, tail })
 }
 
-pub fn resolve(block: &ast::Block<&str>) -> Result<ast::Block<Id>> {
-    let mut ids = IdGen::new();
-    let env = HashMap::new();
-    resolve_block(block, &mut ids, env)
+fn resolve_expr(expr: &ast::Expr<&str>, env: &HashMap<&str, Id>) -> Result<ast::Expr<Id>> {
+    use ast::*;
+    Ok(match expr {
+        Expr::Val(val) => Expr::Val(resolve_val(val, env)?),
+        Expr::Op(op, vals) => {
+            let vals = vals.iter().map(|val| resolve_val(val, env)).collect::<Result<_>>()?;
+            Expr::Op(*op, vals)
+        }
+    })
+}
+
+fn resolve_val(val: &ast::Val<&str>, env: &HashMap<&str, Id>) -> Result<ast::Val<Id>> {
+    use ast::*;
+    Ok(match val {
+        Val::Const(c) => Val::Const(*c),
+        Val::Var(x) => {
+            Val::Var(*env.get(x).with_context(|| format!("unbound variable {x}"))?)
+        }
+    })
 }
 
 pub fn parse(source: &str) -> Result<ast::Block<&str>> {
