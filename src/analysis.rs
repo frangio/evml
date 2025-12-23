@@ -1,107 +1,196 @@
-use std::{collections::HashMap, hash::Hash};
-use crate::graph::{Graph, DepthFirstPostorder, Successors};
+use std::{collections::{HashMap, VecDeque}, hash::Hash};
 
-pub trait Instruction {
-    type VarId: Copy + Eq + Hash;
-    fn index(&self) -> usize;
-    fn defs(&self) -> impl Iterator<Item = Self::VarId>;
-    fn uses(&self) -> impl Iterator<Item = Self::VarId>;
+use crate::{graph::{EntryNode, ExitNode, Graph, Numbered, Postorder, Predecessors, Successors, Transpose, idom, postorder, transpose, cache_predecessors}, set::BitSet};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefUse {
+    Def,
+    Use,
 }
 
 pub trait Procedure {
-    type BlockId: Copy + Eq + Hash;
+    type BlockId: Copy + Eq;
     type VarId: Copy + Eq + Hash;
-    fn cfg(&self) -> impl DepthFirstPostorder<Node = Self::BlockId> + Successors;
-    fn instructions(
-        &self,
-        b: Self::BlockId,
-    ) -> impl DoubleEndedIterator<Item: Instruction<VarId = Self::VarId>>;
+    type InstrIdx: Copy;
+
+    fn cfg(&self) -> impl Cfg<Node = Self::BlockId>;
+    fn instructions(&self, b: Self::BlockId) -> impl DoubleEndedIterator<Item = (Self::InstrIdx, Self::VarId, DefUse)>;
 }
+
+pub trait Cfg: Graph + EntryNode + ExitNode + Successors + Postorder + Numbered {}
+impl<T: Graph + EntryNode + ExitNode + Successors + Postorder + Numbered> Cfg for T {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct VarLiveness {
-    pub live_in: bool,
-    pub last_use: Option<usize>,
+struct VarLiveness<Idx> {
+    live_in: bool,
+    last_use: Option<Idx>,
 }
 
-pub type BlockLiveness<P> = HashMap<<P as Procedure>::VarId, VarLiveness>;
-pub type Liveness<P> = HashMap<<P as Procedure>::BlockId, BlockLiveness<P>>;
+pub type Liveness<P> = Box<[BlockLiveness<P>]>;
+
+pub struct BlockLiveness<P: Procedure> {
+    map: HashMap<P::VarId, VarLiveness<P::InstrIdx>>,
+    in_size: usize,
+}
+
+impl<P: Procedure> Clone for BlockLiveness<P> {
+    fn clone(&self) -> Self {
+        Self { map: self.map.clone(), in_size: self.in_size }
+    }
+}
+
+impl<P: Procedure> BlockLiveness<P> {
+    pub fn live_in(&self, var: P::VarId) -> bool {
+        self.map[&var].live_in
+    }
+
+    pub fn live_out(&self, var: P::VarId) -> bool {
+        self.map[&var].last_use.is_none()
+    }
+
+    pub fn last_use(&self, var: P::VarId) -> Option<P::InstrIdx> {
+        self.map[&var].last_use
+    }
+
+    pub fn live_in_size(&self) -> usize {
+        self.in_size
+    }
+
+}
 
 /// Returns liveness info for each variable per block.
 pub fn liveness<P: Procedure>(proc: &P) -> Liveness<P> {
     let cfg = proc.cfg();
     let n = cfg.node_count();
 
-    let mut result: Liveness<P> = HashMap::with_capacity(n);
+    let mut liveness: Box<[BlockLiveness<P>]> = vec![BlockLiveness { map: HashMap::new(), in_size: 0 }; n].into_boxed_slice();
 
-    for v in 0..n {
-        let block = cfg.node(v);
-        let mut live: BlockLiveness<P> = HashMap::new();
+    for (bpo, block) in cfg.postorder_iter().enumerate() {
+        let mut live: BlockLiveness<P> = BlockLiveness { map: HashMap::new(), in_size: 0 };
 
-        for u in cfg.successors_indices(v) {
-            if u < v {
-                for (&x, info) in &result[&cfg.node(u)] {
-                    if info.live_in {
-                        live.insert(x, VarLiveness { live_in: true, last_use: None });
-                    }
+        for a in cfg.successors(block) {
+            let apo = cfg.postorder(a);
+            assert!(apo < bpo, "cycle detected");
+            for (&x, info) in &liveness[cfg.number(a)].map {
+                if info.live_in {
+                    live.map.entry(x).or_insert_with(|| {
+                        live.in_size += 1;
+                        VarLiveness { live_in: true, last_use: None }
+                    });
                 }
-            } else {
-                unimplemented!("cycles");
             }
         }
 
-        for instr in proc.instructions(block).rev() {
-            let i = instr.index();
-            for x in instr.uses() {
-                live.entry(x).or_insert(VarLiveness { live_in: true, last_use: Some(i) });
-            }
-            for x in instr.defs() {
-                live.entry(x)
-                    .and_modify(|info| info.live_in = false)
-                    .or_insert(VarLiveness { live_in: false, last_use: None });
+        for (i, x, def_use) in proc.instructions(block).rev() {
+            match def_use {
+                DefUse::Use => {
+                    live.map.entry(x).or_insert_with(|| {
+                        live.in_size += 1;
+                        VarLiveness { live_in: true, last_use: Some(i) }
+                    });
+                }
+
+                DefUse::Def => {
+                    live.map.entry(x)
+                        .and_modify(|info| {
+                            if info.live_in {
+                                live.in_size -= 1;
+                            }
+                            info.live_in = false;
+                        })
+                        .or_insert(VarLiveness { live_in: false, last_use: None });
+                }
             }
         }
-
-        result.insert(block, live);
+        liveness[cfg.number(block)] = live;
     }
 
-    result
+    liveness
+}
+
+struct ReverseCfg<G: Graph> {
+    inner: Transpose<G>,
+    postorder: Box<[G::Node]>,
+    postorder_index: Box<[usize]>,
+}
+
+impl<G: Graph> Graph for ReverseCfg<G> {
+    type Node = G::Node;
+
+    fn node_count(&self) -> usize {
+        self.inner.node_count()
+    }
+
+    fn nodes(&self) -> impl Iterator<Item = Self::Node> {
+        self.inner.nodes()
+    }
+}
+
+impl<G: ExitNode> EntryNode for ReverseCfg<G> {
+    fn entry(&self) -> Self::Node {
+        self.inner.entry()
+    }
+}
+
+impl<G: Successors> Predecessors for ReverseCfg<G> {
+    fn predecessors(&self, node: Self::Node) -> impl Iterator<Item = Self::Node> {
+        self.inner.predecessors(node)
+    }
+}
+
+impl<G: Numbered> Postorder for ReverseCfg<G> {
+    fn postorder(&self, node: Self::Node) -> usize {
+        self.postorder_index[self.number(node)]
+    }
+
+    fn at_postorder(&self, index: usize) -> Self::Node {
+        self.postorder[index]
+    }
+}
+
+impl<G: Numbered> Numbered for ReverseCfg<G> {
+    fn number(&self, node: Self::Node) -> usize {
+        self.inner.number(node)
+    }
+
+    fn numbered(&self, number: usize) -> Self::Node {
+        self.inner.numbered(number)
+    }
+}
+
+pub fn ipdom<G: ExitNode + Successors + Numbered>(cfg: G) -> Box<[G::Node]> {
+    let rev_postorder = postorder(&transpose(cache_predecessors(&cfg)));
+
+    let mut rev_postorder_index = vec![0; cfg.node_count()].into_boxed_slice();
+    for (i, &v) in rev_postorder.iter().enumerate() {
+        rev_postorder_index[cfg.number(v)] = i;
+    }
+
+    let rev_cfg = ReverseCfg {
+        inner: transpose(cfg),
+        postorder: rev_postorder,
+        postorder_index: rev_postorder_index,
+    };
+
+    idom(&rev_cfg)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use crate::graph::{StartNode, tests::TestGraph};
-
-    struct TestInstruction<V: 'static> {
-        defs: &'static [V],
-        uses: &'static [V],
-    }
-
-    impl<V: Copy + Eq + Hash> Instruction for (usize, &TestInstruction<V>) {
-        type VarId = V;
-        fn index(&self) -> usize {
-            self.0
-        }
-        fn defs(&self) -> impl Iterator<Item = Self::VarId> {
-            self.1.defs.iter().copied()
-        }
-        fn uses(&self) -> impl Iterator<Item = Self::VarId> {
-            self.1.uses.iter().copied()
-        }
-    }
+    use crate::graph::{EntryNode, ExitNode, Graph, Numbered, Postorder, Successors, tests::TestGraph};
 
     struct TestProcedure<B, V: 'static> {
         cfg: TestGraph<B>,
-        instructions: HashMap<B, &'static [TestInstruction<V>]>,
+        instructions: HashMap<B, &'static [&'static [(DefUse, V)]]>,
     }
 
     impl<B: Copy + Eq + Hash, V> TestProcedure<B, V> {
         fn new(
             start: B,
             edges: &[(B, B)],
-            instructions: &[(B, &'static [TestInstruction<V>])],
+            instructions: &[(B, &'static [&'static [(DefUse, V)]])],
         ) -> Self {
             let cfg = TestGraph::new(start, edges);
             let instructions = instructions.iter().copied().collect();
@@ -112,31 +201,22 @@ mod tests {
     impl<B: Copy + Eq + Hash, V: Copy + Eq + Hash> Procedure for TestProcedure<B, V> {
         type BlockId = B;
         type VarId = V;
+        type InstrIdx = usize;
 
-        fn cfg(&self) -> impl DepthFirstPostorder<Node = Self::BlockId> + Successors {
+        fn cfg(&self) -> impl Cfg<Node = Self::BlockId> {
             &self.cfg
         }
 
-        fn instructions(
-            &self,
-            b: Self::BlockId,
-        ) -> impl DoubleEndedIterator<Item: Instruction<VarId = Self::VarId>> {
+        fn instructions(&self, b: Self::BlockId) -> impl DoubleEndedIterator<Item = (Self::InstrIdx, Self::VarId, DefUse)> {
             self.instructions.get(&b).copied().unwrap_or(&[]).iter().enumerate()
+                .flat_map(|(i, instr)| instr.iter().map(move |&(du, v)| (i, v, du)))
         }
     }
 
     macro_rules! instructions {
-        ($($(def [$($d:literal),*])? $(use [$($u:literal),*])?);*) => {
-            &[$(TestInstruction { defs: &[$($($d),*)?], uses: &[$($($u),*)?] }),*]
-        };
-    }
-
-    const fn live_in(last_use: Option<usize>) -> VarLiveness {
-        VarLiveness { live_in: true, last_use }
-    }
-
-    const fn local(last_use: Option<usize>) -> VarLiveness {
-        VarLiveness { live_in: false, last_use }
+        ($($(def [$($d:literal),*])? $(use [$($u:literal),*])?);*) => {{
+            &[$(&[$($((DefUse::Def, $d)),*)? $($((DefUse::Use, $u)),*)?]),*]
+        }};
     }
 
     #[test]
@@ -146,7 +226,9 @@ mod tests {
             ("A", instructions! { def ["x"]; use ["x"] }),
         ]);
         let result = liveness(&proc);
-        assert_eq!(result["A"], HashMap::from([("x", local(Some(1)))]));
+        let a = &result[proc.cfg.number("A")];
+        assert!(!a.live_in("x"));
+        assert_eq!(a.last_use("x"), Some(1));
     }
 
     #[test]
@@ -157,8 +239,14 @@ mod tests {
             ("B", instructions! { use ["y"] }),
         ]);
         let result = liveness(&proc);
-        assert_eq!(result["A"], HashMap::from([("x", local(Some(2))), ("y", local(None))]));
-        assert_eq!(result["B"], HashMap::from([("y", live_in(Some(0)))]));
+        let a = &result[proc.cfg.number("A")];
+        assert!(!a.live_in("x"));
+        assert_eq!(a.last_use("x"), Some(2));
+        assert!(!a.live_in("y"));
+        assert!(a.live_out("y"));
+        let b = &result[proc.cfg.number("B")];
+        assert!(b.live_in("y"));
+        assert_eq!(b.last_use("y"), Some(0));
     }
 
     #[test]
@@ -176,10 +264,14 @@ mod tests {
             ("D", instructions! { use ["x"] }),
         ]);
         let result = liveness(&proc);
-        assert_eq!(result["A"], HashMap::from([("x", local(None))]));
-        assert_eq!(result["B"], HashMap::from([("x", live_in(None))]));
-        assert_eq!(result["C"], HashMap::from([("x", live_in(None))]));
-        assert_eq!(result["D"], HashMap::from([("x", live_in(Some(0)))]));
+        assert!(!result[proc.cfg.number("A")].live_in("x"));
+        assert!(result[proc.cfg.number("A")].live_out("x"));
+        assert!(result[proc.cfg.number("B")].live_in("x"));
+        assert!(result[proc.cfg.number("B")].live_out("x"));
+        assert!(result[proc.cfg.number("C")].live_in("x"));
+        assert!(result[proc.cfg.number("C")].live_out("x"));
+        assert!(result[proc.cfg.number("D")].live_in("x"));
+        assert_eq!(result[proc.cfg.number("D")].last_use("x"), Some(0));
     }
 
     #[test]
@@ -190,9 +282,11 @@ mod tests {
             ("C", instructions! { use ["x"] }),
         ]);
         let result = liveness(&proc);
-        assert_eq!(result["A"], HashMap::from([]));
-        assert_eq!(result["B"], HashMap::from([("x", local(None))]));
-        assert_eq!(result["C"], HashMap::from([("x", live_in(Some(0)))]));
+        assert_eq!(result[proc.cfg.number("A")].live_in_size(), 0);
+        assert!(!result[proc.cfg.number("B")].live_in("x"));
+        assert!(result[proc.cfg.number("B")].live_out("x"));
+        assert!(result[proc.cfg.number("C")].live_in("x"));
+        assert_eq!(result[proc.cfg.number("C")].last_use("x"), Some(0));
     }
 
     #[test]
@@ -202,7 +296,8 @@ mod tests {
             ("A", instructions! { def ["x"] ; use ["x"] }),
         ]);
         let result = liveness(&proc);
-        assert_eq!(result["A"], HashMap::from([("x", local(Some(1)))]));
+        assert!(!result[proc.cfg.number("A")].live_in("x"));
+        assert_eq!(result[proc.cfg.number("A")].last_use("x"), Some(1));
     }
 
     #[test]
@@ -213,9 +308,11 @@ mod tests {
             ("B", instructions! { use ["x"] }),
         ]);
         let result = liveness(&proc);
-        assert_eq!(result["A"], HashMap::from([("x", local(None))]));
-        assert_eq!(result["B"], HashMap::from([("x", live_in(Some(0)))]));
-        assert_eq!(result["C"], HashMap::from([]));
+        assert!(!result[proc.cfg.number("A")].live_in("x"));
+        assert!(result[proc.cfg.number("A")].live_out("x"));
+        assert!(result[proc.cfg.number("B")].live_in("x"));
+        assert_eq!(result[proc.cfg.number("B")].last_use("x"), Some(0));
+        assert_eq!(result[proc.cfg.number("C")].live_in_size(), 0);
     }
 
     #[test]
@@ -225,6 +322,7 @@ mod tests {
             ("A", instructions! { def ["x"]; use ["x"]; use ["x"] }),
         ]);
         let result = liveness(&proc);
-        assert_eq!(result["A"], HashMap::from([("x", local(Some(2)))]));
+        assert!(!result[proc.cfg.number("A")].live_in("x"));
+        assert_eq!(result[proc.cfg.number("A")].last_use("x"), Some(2));
     }
 }

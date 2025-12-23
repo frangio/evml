@@ -6,16 +6,18 @@ mod scc;
 mod graph;
 mod analysis;
 mod compile;
+mod utils;
+mod set;
 
 pub use runner::run;
 pub use compile::*;
 
-use std::{collections::HashMap, iter::{chain, once, zip}, num::NonZeroUsize, slice};
+use std::{collections::HashMap, iter::once, num::NonZeroUsize};
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use revm::{bytecode::opcode, primitives::U256};
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Id(NonZeroUsize);
 
 #[repr(usize)]
@@ -34,10 +36,10 @@ impl Id {
     const ROOT: Self = Id(IdReserve::Root.into_non_zero());
 }
 
-struct IdGen(NonZeroUsize);
+pub struct IdGen(NonZeroUsize);
 
 impl IdGen {
-    fn new() -> IdGen {
+    pub fn new() -> IdGen {
         IdGen(IdReserve::Unallocated.into_non_zero())
     }
 
@@ -75,24 +77,46 @@ pub mod core {
     use super::Id;
     use revm::primitives::U256;
 
-    #[derive(PartialEq, Eq)]
+    #[derive(PartialEq, Eq, Debug)]
     pub enum Val {
         Const(U256),
         Var(Id),
     }
 
+    #[derive(PartialEq, Eq, Debug)]
     pub enum Expr {
         Val(Val),
         Op(u8, Vec<Val>),
+        IfThenElse(Val, Box<[Block; 2]>),
     }
 
+    #[derive(PartialEq, Eq, Debug)]
     pub enum BlockPrior {
         Let(Option<Id>, Expr),
     }
 
+    #[derive(PartialEq, Eq, Debug)]
     pub struct Block {
         pub priors: Vec<BlockPrior>,
         pub tail: Expr,
+    }
+
+    impl Default for Val {
+        fn default() -> Self {
+            Val::Const(Default::default())
+        }
+    }
+
+    impl Default for Expr {
+        fn default() -> Self {
+            Expr::Val(Default::default())
+        }
+    }
+
+    impl Default for BlockPrior {
+        fn default() -> Self {
+            BlockPrior::Let(None, Default::default())
+        }
     }
 }
 
@@ -100,12 +124,18 @@ pub mod asm {
     use super::Id;
     use revm::primitives::U256;
 
+    #[derive(Debug, PartialEq, Eq, Clone, Copy)]
     pub enum Instr {
         Pop,
         Push(U256),
         Swap(usize),
         Dup(usize),
         Op(u8),
+        JumpDest(Id),
+        PushLabel(Id),
+        JumpIf,
+        Jump,
+        Stop,
     }
 }
 
@@ -119,6 +149,11 @@ pub fn assemble(code: &[asm::Instr]) -> Vec<u8> {
             Swap(depth) => bytecode.push(opcode_swap(*depth)),
             Dup(depth) => bytecode.push(opcode_dup(*depth)),
             Op(op) => bytecode.push(*op),
+            JumpDest(id) => todo!(),
+            PushLabel(id) => todo!(),
+            JumpIf => bytecode.push(opcode::JUMPI),
+            Jump => bytecode.push(opcode::JUMP),
+            Stop => bytecode.push(opcode::STOP),
         }
     }
     bytecode
@@ -225,8 +260,7 @@ fn lower_val(val: ast::Val<Id>) -> core::Val {
     }
 }
 
-pub fn resolve(block: &ast::Block<&str>) -> Result<ast::Block<Id>> {
-    let mut ids = IdGen::new();
+pub fn resolve(block: &ast::Block<&str>, mut ids: &mut IdGen) -> Result<ast::Block<Id>> {
     let env = HashMap::new();
     resolve_block(block, &mut ids, env)
 }
@@ -362,6 +396,10 @@ mod tests {
 
     macro_rules! id {
         ($n:expr) => { Id(::std::num::NonZeroUsize::new($n).unwrap()) }
+    }
+
+    fn compile(block: core::Block) -> Vec<asm::Instr> {
+        super::compile(block, &mut IdGen::new())
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use std::{cmp::max, collections::{hash_map::Entry, HashMap}, convert::identity, hash::Hash, iter::{chain, successors, zip}, mem, ops::Deref};
+use std::{cmp::max, collections::{hash_map::Entry, HashMap}, convert::identity, hash::Hash, iter::{chain, successors, zip}, ops::Deref};
 
 pub struct Edges<T> {
     inner: Vec<(T, T)>,
