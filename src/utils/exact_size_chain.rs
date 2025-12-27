@@ -1,4 +1,4 @@
-use std::{iter::{self, Chain, FusedIterator}, num::NonZero};
+use std::{iter::{self, Chain, FusedIterator}};
 
 #[derive(Debug, Clone, Default)]
 pub struct ExactSizeChain<A, B>(Chain<A, B>);

@@ -7,7 +7,6 @@ mod graph;
 mod analysis;
 mod compile;
 mod utils;
-mod set;
 
 pub use runner::run;
 pub use compile::*;

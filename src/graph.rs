@@ -1,6 +1,6 @@
 use std::{collections::VecDeque, hash::Hash, mem::replace, num::NonZero};
 
-use crate::set::BitSet;
+use crate::utils::BitSet;
 
 pub trait Graph {
     type Node: Copy + Eq;
