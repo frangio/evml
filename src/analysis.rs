@@ -1,6 +1,6 @@
-use std::{collections::{HashMap, VecDeque}, hash::Hash};
+use std::{collections::HashMap, hash::Hash};
 
-use crate::{graph::{EntryNode, ExitNode, Graph, Numbered, Postorder, Predecessors, Successors, Transpose, idom, postorder, transpose, cache_predecessors}, utils::BitSet};
+use crate::{graph::{EntryNode, ExitNode, Graph, Numbered, Postorder, Predecessors, Successors, Transpose, idom, postorder, transpose, cache_predecessors}};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DefUse {
@@ -179,7 +179,7 @@ pub fn ipdom<G: ExitNode + Successors + Numbered>(cfg: G) -> Box<[G::Node]> {
 mod tests {
     use super::*;
 
-    use crate::graph::{EntryNode, ExitNode, Graph, Numbered, Postorder, Successors, tests::TestGraph};
+    use crate::graph::{Numbered, tests::TestGraph};
 
     struct TestProcedure<B, V: 'static> {
         cfg: TestGraph<B>,

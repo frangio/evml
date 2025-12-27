@@ -134,7 +134,7 @@ fn compile_cont(
     cont: Cont,
     stack: &mut Stack,
     live_out: impl Fn(Id) -> bool,
-    ipdom_live_in: impl Fn(Id) -> bool,
+    _ipdom_live_in: impl Fn(Id) -> bool,
     code: &mut Vec<asm::Instr>,
 ) {
     use core::*;
@@ -156,7 +156,7 @@ fn compile_cont(
     }
 
     match cont {
-        Cont::Stop(res) => {
+        Cont::Stop(_) => {
             code.push(Instr::Stop);
         }
 
@@ -474,8 +474,8 @@ fn index(block: core::Block, ids: &mut IdGen) -> IndexedProc {
     let mut labels = HashMap::<Id, BlockId>::with_capacity(labeled_blocks);
 
     // Blocks are now in postorder
-    let mut blocks: Vec<_> = Vec::from(queue).into_iter().enumerate().map(|(i, item)| {
-        let QueueItem::Finished(mut b) = item else { unreachable!() };
+    let blocks: Vec<_> = Vec::from(queue).into_iter().enumerate().map(|(i, item)| {
+        let QueueItem::Finished(b) = item else { unreachable!() };
         if let Some(label) = b.label {
             labels.insert(label, BlockId(NonZero::new(i + 2).unwrap()));
         }
@@ -617,7 +617,7 @@ mod tests {
     use revm::primitives::U256;
 
     use super::*;
-    use crate::{IdGen, asm::Instr::*, core::{self, Block, BlockPrior::*, Expr::*, Val::*}, graph::{Predecessors, Successors}};
+    use crate::{IdGen, asm::Instr::*, core::{Block, BlockPrior::*, Expr::*, Val::*}, graph::Successors};
 
     macro_rules! generate_ids {
         ($ids:ident => $($id:ident),+) => {
@@ -683,7 +683,7 @@ mod tests {
     #[test]
     fn test_index_if_then_else_prior() {
         let mut ids = IdGen::new();
-        generate_ids! { ids => x, y, z };
+        generate_ids! { ids => x, y };
         let block = Block {
             priors: vec![
                 Let(Some(x), Val(Const(U256::from(1)))),

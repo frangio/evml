@@ -1,4 +1,4 @@
-#![allow(unused)]
+#![allow(dead_code)]
 
 mod runner;
 mod opcodes;
@@ -148,8 +148,8 @@ pub fn assemble(code: &[asm::Instr]) -> Vec<u8> {
             Swap(depth) => bytecode.push(opcode_swap(*depth)),
             Dup(depth) => bytecode.push(opcode_dup(*depth)),
             Op(op) => bytecode.push(*op),
-            JumpDest(id) => todo!(),
-            PushLabel(id) => todo!(),
+            JumpDest(_id) => todo!(),
+            PushLabel(_id) => todo!(),
             JumpIf => bytecode.push(opcode::JUMPI),
             Jump => bytecode.push(opcode::JUMP),
             Stop => bytecode.push(opcode::STOP),
@@ -403,7 +403,7 @@ mod tests {
 
     #[test]
     fn test_const() {
-        use super::core::{Block, BlockPrior::*, Expr::*, Val::*};
+        use super::core::{Block, Expr::*, Val::*};
         let block = Block {
             priors: vec![],
             tail: Val(Const(U256::from(42))),
@@ -415,7 +415,7 @@ mod tests {
 
     #[test]
     fn test_op_div() {
-        use super::core::{Block, BlockPrior::*, Expr::*, Val::*};
+        use super::core::{Block, Expr::*, Val::*};
         let block = Block {
             priors: vec![],
             tail: Op(0x04, vec![Const(U256::from(84)), Const(U256::from(2))]),
@@ -484,7 +484,7 @@ mod tests {
 
     #[test]
     fn test_type_check_div_ok() {
-        use super::ast::{Block, BlockPrior::*, Expr::*, Val::*};
+        use super::ast::{Block, Expr::*, Val::*};
         let block = Block {
             priors: vec![],
             tail: Op(0x04, vec![Const(U256::from(84)), Const(U256::from(2))]),
@@ -494,7 +494,7 @@ mod tests {
 
     #[test]
     fn test_type_check_div_err() {
-        use super::ast::{Block, BlockPrior::*, Expr::*, Val::*};
+        use super::ast::{Block, Expr::*, Val::*};
         let block = Block {
             priors: vec![],
             tail: Op(0x04, vec![Const(U256::from(84))]),
