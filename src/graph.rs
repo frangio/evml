@@ -1,6 +1,6 @@
 use std::{mem::replace, num::NonZero};
 
-use crate::utils::BitSet;
+use crate::utils::{BitSet, ShiftStack};
 
 pub trait Graph {
     type Node: Copy + Eq;
@@ -277,38 +277,31 @@ pub fn postorder<G: EntryNode + Successors + Numbered>(g: &G) -> Box<[G::Node]> 
     let visited = |v| g.number(v);
     let seen = |v| n + g.number(v);
 
-    let mut buffer = Box::new_uninit_slice(n);
-    let mut input = n;
-    let mut output = 0;
+    let mut buffer = ShiftStack::new(n);
 
     let entry = g.entry();
-
     flags.insert(seen(entry));
-    input -= 1;
-    buffer[input].write(entry);
+    buffer.push(entry);
 
-    while flags.unset() > 0 {
-        let v = unsafe { buffer[input].assume_init_read() };
+    while let Some(&v) = buffer.top() {
         if flags.insert(visited(v)) {
             for w in g.successors(v) {
                 if flags.insert(seen(w)) {
-                    input -= 1;
-                    buffer[input].write(w);
+                    buffer.push(w);
                 }
             }
         } else {
-            buffer.swap(input, output);
-            input += 1;
-            output += 1;
+            buffer.shift();
         }
     }
 
-    unsafe { buffer.assume_init() }
+    buffer.into_boxed_slice()
 }
 
 #[cfg(test)]
 pub mod tests {
     use super::*;
+    use std::hash::Hash;
     use std::collections::{HashMap, HashSet};
     use std::iter::zip;
 

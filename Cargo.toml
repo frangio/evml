@@ -15,3 +15,4 @@ test = false
 [lints.clippy]
 complexity = "allow"
 new_without_default = "allow"
+unnecessary_lazy_evaluations = "allow"
