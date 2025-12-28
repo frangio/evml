@@ -617,18 +617,12 @@ mod tests {
     use revm::primitives::U256;
 
     use super::*;
-    use crate::{IdGen, asm::Instr::*, core::{Block, BlockPrior::*, Expr::*, Val::*}, graph::Successors};
-
-    macro_rules! generate_ids {
-        ($ids:ident => $($id:ident),+) => {
-            $(let $id = $ids.generate();)+
-        };
-    }
+    use crate::{IdGen, generate_ids, asm::Instr::*, core::{Block, BlockPrior::*, Expr::*, Val::*}, graph::Successors};
 
     #[test]
     fn test_index_trivial() {
         let mut ids = IdGen::new();
-        generate_ids! { ids => x };
+        generate_ids!(ids => x);
         let block = Block {
             priors: vec![],
             tail: Val(Var(x)),
@@ -645,7 +639,7 @@ mod tests {
     #[test]
     fn test_index_if_then_else_tail() {
         let mut ids = IdGen::new();
-        generate_ids! { ids => x, y, z };
+        generate_ids!(ids => x, y, z);
         let block = Block {
             priors: vec![],
             tail: IfThenElse(
@@ -683,7 +677,7 @@ mod tests {
     #[test]
     fn test_index_if_then_else_prior() {
         let mut ids = IdGen::new();
-        generate_ids! { ids => x, y };
+        generate_ids!(ids => x, y);
         let block = Block {
             priors: vec![
                 Let(Some(x), Val(Const(U256::from(1)))),
@@ -723,7 +717,7 @@ mod tests {
     #[test]
     fn test_compile_if_then_else_tail() {
         let mut ids = IdGen::new();
-        generate_ids! { ids => x };
+        generate_ids!(ids => x);
         let block = Block {
             priors: vec![
                 Let(Some(x), Val(Const(U256::from(2)))),
@@ -737,7 +731,7 @@ mod tests {
             ),
         };
         let code = compile(block, &mut ids);
-        generate_ids! { ids => label };
+        generate_ids!(ids => label);
         assert_eq!(code, vec![
             Push(U256::from(2)),
             PushLabel(label),
@@ -753,7 +747,7 @@ mod tests {
     #[test]
     fn test_compile_if_then_else_prior() {
         let mut ids = IdGen::new();
-        generate_ids! { ids => x, y };
+        generate_ids!(ids => x, y);
         let block = Block {
             priors: vec![
                 Let(Some(x), Val(Const(U256::from(1)))),
@@ -768,7 +762,7 @@ mod tests {
             tail: Val(Var(y)),
         };
         let code = compile(block, &mut ids);
-        generate_ids! { ids => label1, label2 };
+        generate_ids!(ids => label1, label2);
         assert_eq!(code, vec![
             Push(U256::from(1)),
             PushLabel(label1),

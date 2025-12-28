@@ -49,6 +49,15 @@ impl IdGen {
     }
 }
 
+#[cfg(test)]
+macro_rules! generate_ids {
+    ($ids:ident => $($id:ident),+) => {
+        $(let $id = $ids.generate();)+
+    };
+}
+#[cfg(test)]
+pub(crate) use generate_ids;
+
 pub mod ast {
     use revm::primitives::U256;
 
@@ -393,22 +402,15 @@ pub fn parse(source: &str) -> Result<ast::Block<&str>> {
 mod tests {
     use super::*;
 
-    macro_rules! id {
-        ($n:expr) => { Id(::std::num::NonZeroUsize::new($n).unwrap()) }
-    }
-
-    fn compile(block: core::Block) -> Vec<asm::Instr> {
-        super::compile(block, &mut IdGen::new())
-    }
-
     #[test]
     fn test_const() {
         use super::core::{Block, Expr::*, Val::*};
+        let mut ids = IdGen::new();
         let block = Block {
             priors: vec![],
             tail: Val(Const(U256::from(42))),
         };
-        let code = compile(block);
+        let code = compile(block, &mut ids);
         let stack = run(&assemble(&code)).expect("execution failed");
         assert_eq!(stack, vec![U256::from(42)]);
     }
@@ -416,11 +418,12 @@ mod tests {
     #[test]
     fn test_op_div() {
         use super::core::{Block, Expr::*, Val::*};
+        let mut ids = IdGen::new();
         let block = Block {
             priors: vec![],
             tail: Op(0x04, vec![Const(U256::from(84)), Const(U256::from(2))]),
         };
-        let code = compile(block);
+        let code = compile(block, &mut ids);
         let stack = run(&assemble(&code)).expect("execution failed");
         assert_eq!(stack, vec![U256::from(42)]);
     }
@@ -428,13 +431,15 @@ mod tests {
     #[test]
     fn test_let_val() {
         use super::core::{Block, BlockPrior::*, Expr::*, Val::*};
+        let mut ids = IdGen::new();
+        generate_ids!(ids => x);
         let block = Block {
             priors: vec![
-                Let(Some(id!(1)), Val(Const(U256::from(2)))),
+                Let(Some(x), Val(Const(U256::from(2)))),
             ],
-            tail: Op(0x04, vec![Const(U256::from(84)), Var(id!(1))]),
+            tail: Op(0x04, vec![Const(U256::from(84)), Var(x)]),
         };
-        let code = compile(block);
+        let code = compile(block, &mut ids);
         let stack = run(&assemble(&code)).expect("execution failed");
         assert_eq!(stack, vec![U256::from(42)]);
     }
@@ -442,13 +447,15 @@ mod tests {
     #[test]
     fn test_let_op() {
         use super::core::{Block, BlockPrior::*, Expr::*, Val::*};
+        let mut ids = IdGen::new();
+        generate_ids!(ids => x);
         let block = Block {
             priors: vec![
-                Let(Some(id!(1)), Op(0x04, vec![Const(U256::from(84)), Const(U256::from(2))])),
+                Let(Some(x), Op(0x04, vec![Const(U256::from(84)), Const(U256::from(2))])),
             ],
-            tail: Val(Var(id!(1))),
+            tail: Val(Var(x)),
         };
-        let code = compile(block);
+        let code = compile(block, &mut ids);
         let stack = run(&assemble(&code)).expect("execution failed");
         assert_eq!(stack, vec![U256::from(42)]);
     }
@@ -456,13 +463,15 @@ mod tests {
     #[test]
     fn test_let_op_reuse() {
         use super::core::{Block, BlockPrior::*, Expr::*, Val::*};
+        let mut ids = IdGen::new();
+        generate_ids!(ids => x);
         let block = Block {
             priors: vec![
-                Let(Some(id!(1)), Val(Const(U256::from(42)))),
+                Let(Some(x), Val(Const(U256::from(42)))),
             ],
-            tail: Op(0x04, vec![Var(id!(1)), Var(id!(1))]),
+            tail: Op(0x04, vec![Var(x), Var(x)]),
         };
-        let code = compile(block);
+        let code = compile(block, &mut ids);
         let stack = run(&assemble(&code)).expect("execution failed");
         assert_eq!(stack, vec![U256::from(1)]);
     }
@@ -470,14 +479,16 @@ mod tests {
     #[test]
     fn test_let_unused() {
         use super::core::{Block, BlockPrior::*, Expr::*, Val::*};
+        let mut ids = IdGen::new();
+        generate_ids!(ids => x, y);
         let block = Block {
             priors: vec![
-                Let(Some(id!(1)), Val(Const(U256::from(100)))),
-                Let(Some(id!(2)), Val(Const(U256::from(100)))),
+                Let(Some(x), Val(Const(U256::from(100)))),
+                Let(Some(y), Val(Const(U256::from(100)))),
             ],
             tail: Val(Const(U256::from(42))),
         };
-        let code = compile(block);
+        let code = compile(block, &mut ids);
         let stack = run(&assemble(&code)).expect("execution failed");
         assert_eq!(stack, vec![U256::from(42)]);
     }
@@ -505,9 +516,11 @@ mod tests {
     #[test]
     fn test_type_check_pop_err() {
         use super::ast::{Block, BlockPrior::*, Expr::*, Val::*};
+        let mut ids = IdGen::new();
+        generate_ids!(ids => x);
         let block = Block {
             priors: vec![
-                Let(Some(id!(1)), Op(0x50, vec![Const(U256::from(42))])),
+                Let(Some(x), Op(0x50, vec![Const(U256::from(42))])),
             ],
             tail: Val(Const(U256::from(0))),
         };
