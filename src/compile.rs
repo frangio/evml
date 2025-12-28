@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque, hash_map};
 use std::iter::{chain, repeat_n, zip};
 use std::mem::{take};
 use std::num::NonZero;
+use std::ops::Range;
 use std::slice;
 
 use crate::utils::exact_size_chain;
@@ -48,21 +49,32 @@ impl Stack {
         self.0.swap(index, top);
     }
 
+    fn read(&self, depth: usize) -> Id {
+        let top = self.0.len() - 1;
+        let index = top - depth;
+        self.0[index].unwrap()
+    }
+
     fn entry(&mut self, x: Id) -> StackEntry<'_> {
         let index = self.0.iter()
             .rposition(|y| y.as_ref().is_some_and(|&y| y == x))
             .expect("unknown variable");
         StackEntry { stack: self, index }
     }
+
+    fn find_depth(&self, depths: Range<usize>, pred: impl Fn(Option<Id>) -> bool) -> Option<usize> {
+        let top = self.0.len() - 1;
+        let [start_index, end_index] = [depths.end, depths.start].map(|d| top - d);
+        self.0[start_index..end_index].iter()
+            .copied()
+            .rposition(pred)
+            .map(|i| top - (start_index + i))
+    }
 }
 
 impl StackEntry<'_> {
     fn var(&self) -> Id {
         self.stack.0[self.index].expect("stack item is temporary")
-    }
-
-    fn set(&mut self, x: Id) {
-        self.stack.0[self.index] = Some(x);
     }
 
     fn depth(&self) -> usize {
@@ -99,11 +111,10 @@ pub fn compile(block: core::Block, ids: &mut IdGen) -> Vec<asm::Instr> {
 
         let ipdom = proc.ipdom[proc.number(block_id)];
         let ipdom_liveness = &analysis.liveness[proc.number(ipdom)];
-        let ipdom_live_in = |x| ipdom_liveness.live_in(x);
 
-        let live_out = |x| liveness.live_out(x);
+        let live_out = |x| liveness.last_use(x).is_none_or(|i| i == InstrIdx::Cont);
 
-        compile_cont(block.data.cont, stack, live_out, ipdom_live_in, &mut code);
+        compile_cont(block.data.cont, stack, live_out, ipdom_liveness, &mut code);
 
         let (_, stack) = stack_entry.remove_entry();
         let succs = proc.successors(block_id);
@@ -134,16 +145,45 @@ fn compile_cont(
     cont: Cont,
     stack: &mut Stack,
     live_out: impl Fn(Id) -> bool,
-    _ipdom_live_in: impl Fn(Id) -> bool,
+    ipdom_liveness: &BlockLiveness,
     code: &mut Vec<asm::Instr>,
 ) {
     use core::*;
     use asm::*;
 
+    let stash_start = stack.len() - 1 - ipdom_liveness.live_in_size();
+    let mut next_avail = stash_start;
+    let mut popped = 0;
 
+    for d in 0..stash_start {
+        let d = d - popped;
+        let x = stack.read(d);
+        if !live_out(x) {
+            if d > 0 {
+                code.push(Instr::Swap(d));
+                stack.swap(d);
+            }
+            code.push(Instr::Pop);
+            stack.popn(1);
+            popped += 1;
+            next_avail -= 1;
+        } else if ipdom_liveness.live_in(x) {
+            let e = (next_avail..stack.len()).find(|&e| {
+                let y = stack.read(e);
+                !ipdom_liveness.live_in(y)
+            }).unwrap();
+            next_avail = e + 1;
+            if d > 0 {
+                code.push(Instr::Swap(d));
+                stack.swap(d);
+            }
+            code.push(Instr::Swap(e));
+            stack.swap(e);
+        }
+    }
 
     if let Cont::Stop(res) | Cont::Jump(_, res) = cont {
-        assert!(dbg!(res).is_none() || Some(&res) == dbg!(&stack.0).last());
+        assert!(res.is_none() || Some(&res) == stack.0.last());
         let res_size = res.map_or(0, |_| 1);
         let stack_size = stack.len();
         if stack_size > res_size {
@@ -236,14 +276,14 @@ fn compile_val_onto(
         Val::Var(x) => {
             let mut entry = stack.entry(*x);
             let depth = entry.depth();
-            if !should_swap(&entry) {
-                code.push(Instr::Dup(depth));
-            } else {
+            if should_swap(&entry) {
                 if depth > 0 {
                     code.push(Instr::Swap(depth));
                     entry.swap();
                 }
                 stack.popn(1);
+            } else {
+                code.push(Instr::Dup(depth));
             }
         }
     }

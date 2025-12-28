@@ -41,7 +41,7 @@ impl<P: Procedure> Clone for BlockLiveness<P> {
 
 impl<P: Procedure> BlockLiveness<P> {
     pub fn live_in(&self, var: P::VarId) -> bool {
-        self.map[&var].live_in
+        self.map.get(&var).is_some_and(|l| l.live_in)
     }
 
     pub fn live_out(&self, var: P::VarId) -> bool {
