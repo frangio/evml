@@ -1,6 +1,6 @@
 use std::{collections::HashMap, hash::Hash};
 
-use crate::{graph::{EntryNode, ExitNode, Graph, Numbered, Postorder, Predecessors, Successors, Transpose, idom, postorder, transpose, cache_predecessors}};
+use crate::{graph::{EntryNode, ExitNode, Graph, Idx, Postorder, Predecessors, Successors, Transpose, idom, postorder, transpose, cache_predecessors}};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DefUse {
@@ -9,7 +9,7 @@ pub enum DefUse {
 }
 
 pub trait Procedure {
-    type BlockId: Copy + Eq;
+    type BlockId: Copy + Eq + Idx;
     type VarId: Copy + Eq + Hash;
     type InstrIdx: Copy;
 
@@ -17,8 +17,8 @@ pub trait Procedure {
     fn instructions(&self, b: Self::BlockId) -> impl DoubleEndedIterator<Item = (Self::InstrIdx, Self::VarId, DefUse)>;
 }
 
-pub trait Cfg: Graph + EntryNode + ExitNode + Successors + Postorder + Numbered {}
-impl<T: Graph + EntryNode + ExitNode + Successors + Postorder + Numbered> Cfg for T {}
+pub trait Cfg: Graph + EntryNode + ExitNode + Successors + Postorder {}
+impl<T: Graph + EntryNode + ExitNode + Successors + Postorder> Cfg for T {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct VarLiveness<Idx> {
@@ -71,7 +71,7 @@ pub fn liveness<P: Procedure>(proc: &P) -> Liveness<P> {
         for a in cfg.successors(block) {
             let apo = cfg.postorder(a);
             assert!(apo < bpo, "cycle detected");
-            for (&x, info) in &liveness[cfg.number(a)].map {
+            for (&x, info) in &liveness[a.index()].map {
                 if info.live_in {
                     live.map.entry(x).or_insert_with(|| {
                         live.in_size += 1;
@@ -102,7 +102,7 @@ pub fn liveness<P: Procedure>(proc: &P) -> Liveness<P> {
                 }
             }
         }
-        liveness[cfg.number(block)] = live;
+        liveness[block.index()] = live;
     }
 
     liveness
@@ -138,9 +138,9 @@ impl<G: Successors> Predecessors for ReverseCfg<G> {
     }
 }
 
-impl<G: Numbered> Postorder for ReverseCfg<G> {
+impl<G: Graph> Postorder for ReverseCfg<G> {
     fn postorder(&self, node: Self::Node) -> usize {
-        self.postorder_index[self.number(node)]
+        self.postorder_index[node.index()]
     }
 
     fn at_postorder(&self, index: usize) -> Self::Node {
@@ -148,22 +148,12 @@ impl<G: Numbered> Postorder for ReverseCfg<G> {
     }
 }
 
-impl<G: Numbered> Numbered for ReverseCfg<G> {
-    fn number(&self, node: Self::Node) -> usize {
-        self.inner.number(node)
-    }
-
-    fn numbered(&self, number: usize) -> Self::Node {
-        self.inner.numbered(number)
-    }
-}
-
-pub fn ipdom<G: ExitNode + Successors + Numbered>(cfg: G) -> Box<[G::Node]> {
+pub fn ipdom<G: ExitNode + Successors>(cfg: G) -> Box<[G::Node]> {
     let rev_postorder = postorder(&transpose(cache_predecessors(&cfg)));
 
     let mut rev_postorder_index = vec![0; cfg.node_count()].into_boxed_slice();
     for (i, &v) in rev_postorder.iter().enumerate() {
-        rev_postorder_index[cfg.number(v)] = i;
+        rev_postorder_index[v.index()] = i;
     }
 
     let rev_cfg = ReverseCfg {
@@ -179,18 +169,18 @@ pub fn ipdom<G: ExitNode + Successors + Numbered>(cfg: G) -> Box<[G::Node]> {
 mod tests {
     use super::*;
 
-    use crate::graph::{Numbered, tests::TestGraph};
+    use crate::graph::tests::TestGraph;
 
-    struct TestProcedure<B, V: 'static> {
-        cfg: TestGraph<B>,
-        instructions: HashMap<B, &'static [&'static [(DefUse, V)]]>,
+    struct TestProcedure<V: 'static> {
+        cfg: TestGraph,
+        instructions: HashMap<usize, &'static [&'static [(DefUse, V)]]>,
     }
 
-    impl<B: Copy + Eq + Hash, V> TestProcedure<B, V> {
+    impl<V> TestProcedure<V> {
         fn new(
-            start: B,
-            edges: &[(B, B)],
-            instructions: &[(B, &'static [&'static [(DefUse, V)]])],
+            start: usize,
+            edges: &[(usize, usize)],
+            instructions: &[(usize, &'static [&'static [(DefUse, V)]])],
         ) -> Self {
             let cfg = TestGraph::new(start, edges);
             let instructions = instructions.iter().copied().collect();
@@ -198,8 +188,8 @@ mod tests {
         }
     }
 
-    impl<B: Copy + Eq + Hash, V: Copy + Eq + Hash> Procedure for TestProcedure<B, V> {
-        type BlockId = B;
+    impl<V: Copy + Eq + Hash> Procedure for TestProcedure<V> {
+        type BlockId = usize;
         type VarId = V;
         type InstrIdx = usize;
 
@@ -221,108 +211,108 @@ mod tests {
 
     #[test]
     fn test_liveness_single_block() {
-        // A: def x; use x
-        let proc = TestProcedure::new("A", &[], &[
-            ("A", instructions! { def ["x"]; use ["x"] }),
+        // 0: def x; use x
+        let proc = TestProcedure::new(0, &[], &[
+            (0, instructions! { def ["x"]; use ["x"] }),
         ]);
         let result = liveness(&proc);
-        let a = &result[proc.cfg.number("A")];
+        let a = &result[0];
         assert!(!a.live_in("x"));
         assert_eq!(a.last_use("x"), Some(1));
     }
 
     #[test]
     fn test_liveness_linear() {
-        // A: def x; def y; use x  →  B: use y
-        let proc = TestProcedure::new("A", &[("A", "B")], &[
-            ("A", instructions! { def ["x"]; def ["y"]; use ["x"] }),
-            ("B", instructions! { use ["y"] }),
+        // 0: def x; def y; use x  →  1: use y
+        let proc = TestProcedure::new(0, &[(0, 1)], &[
+            (0, instructions! { def ["x"]; def ["y"]; use ["x"] }),
+            (1, instructions! { use ["y"] }),
         ]);
         let result = liveness(&proc);
-        let a = &result[proc.cfg.number("A")];
+        let a = &result[0];
         assert!(!a.live_in("x"));
         assert_eq!(a.last_use("x"), Some(2));
         assert!(!a.live_in("y"));
         assert!(a.live_out("y"));
-        let b = &result[proc.cfg.number("B")];
+        let b = &result[1];
         assert!(b.live_in("y"));
         assert_eq!(b.last_use("y"), Some(0));
     }
 
     #[test]
     fn test_liveness_diamond() {
-        //     A: def x
+        //     0: def x
         //    / \
-        //   B   C
+        //   1   2
         //    \ /
-        //     D: use x
-        let proc = TestProcedure::new("A", &[
-            ("A", "B"), ("A", "C"),
-            ("B", "D"), ("C", "D"),
+        //     3: use x
+        let proc = TestProcedure::new(0, &[
+            (0, 1), (0, 2),
+            (1, 3), (2, 3),
         ], &[
-            ("A", instructions! { def ["x"] }),
-            ("D", instructions! { use ["x"] }),
+            (0, instructions! { def ["x"] }),
+            (3, instructions! { use ["x"] }),
         ]);
         let result = liveness(&proc);
-        assert!(!result[proc.cfg.number("A")].live_in("x"));
-        assert!(result[proc.cfg.number("A")].live_out("x"));
-        assert!(result[proc.cfg.number("B")].live_in("x"));
-        assert!(result[proc.cfg.number("B")].live_out("x"));
-        assert!(result[proc.cfg.number("C")].live_in("x"));
-        assert!(result[proc.cfg.number("C")].live_out("x"));
-        assert!(result[proc.cfg.number("D")].live_in("x"));
-        assert_eq!(result[proc.cfg.number("D")].last_use("x"), Some(0));
+        assert!(!result[0].live_in("x"));
+        assert!(result[0].live_out("x"));
+        assert!(result[1].live_in("x"));
+        assert!(result[1].live_out("x"));
+        assert!(result[2].live_in("x"));
+        assert!(result[2].live_out("x"));
+        assert!(result[3].live_in("x"));
+        assert_eq!(result[3].last_use("x"), Some(0));
     }
 
     #[test]
     fn test_liveness_def_kills() {
-        // A  →  B: def x  →  C: use x
-        let proc = TestProcedure::new("A", &[("A", "B"), ("B", "C")], &[
-            ("B", instructions! { def ["x"] }),
-            ("C", instructions! { use ["x"] }),
+        // 0  →  1: def x  →  2: use x
+        let proc = TestProcedure::new(0, &[(0, 1), (1, 2)], &[
+            (1, instructions! { def ["x"] }),
+            (2, instructions! { use ["x"] }),
         ]);
         let result = liveness(&proc);
-        assert_eq!(result[proc.cfg.number("A")].live_in_size(), 0);
-        assert!(!result[proc.cfg.number("B")].live_in("x"));
-        assert!(result[proc.cfg.number("B")].live_out("x"));
-        assert!(result[proc.cfg.number("C")].live_in("x"));
-        assert_eq!(result[proc.cfg.number("C")].last_use("x"), Some(0));
+        assert_eq!(result[0].live_in_size(), 0);
+        assert!(!result[1].live_in("x"));
+        assert!(result[1].live_out("x"));
+        assert!(result[2].live_in("x"));
+        assert_eq!(result[2].last_use("x"), Some(0));
     }
 
     #[test]
     fn test_liveness_local() {
-        // A: def x; use x
-        let proc = TestProcedure::new("A", &[], &[
-            ("A", instructions! { def ["x"] ; use ["x"] }),
+        // 0: def x; use x
+        let proc = TestProcedure::new(0, &[], &[
+            (0, instructions! { def ["x"] ; use ["x"] }),
         ]);
         let result = liveness(&proc);
-        assert!(!result[proc.cfg.number("A")].live_in("x"));
-        assert_eq!(result[proc.cfg.number("A")].last_use("x"), Some(1));
+        assert!(!result[0].live_in("x"));
+        assert_eq!(result[0].last_use("x"), Some(1));
     }
 
     #[test]
     fn test_liveness_last_use() {
-        // A: def x  →  B: use x  →  C
-        let proc = TestProcedure::new("A", &[("A", "B"), ("B", "C")], &[
-            ("A", instructions! { def ["x"] }),
-            ("B", instructions! { use ["x"] }),
+        // 0: def x  →  1: use x  →  2
+        let proc = TestProcedure::new(0, &[(0, 1), (1, 2)], &[
+            (0, instructions! { def ["x"] }),
+            (1, instructions! { use ["x"] }),
         ]);
         let result = liveness(&proc);
-        assert!(!result[proc.cfg.number("A")].live_in("x"));
-        assert!(result[proc.cfg.number("A")].live_out("x"));
-        assert!(result[proc.cfg.number("B")].live_in("x"));
-        assert_eq!(result[proc.cfg.number("B")].last_use("x"), Some(0));
-        assert_eq!(result[proc.cfg.number("C")].live_in_size(), 0);
+        assert!(!result[0].live_in("x"));
+        assert!(result[0].live_out("x"));
+        assert!(result[1].live_in("x"));
+        assert_eq!(result[1].last_use("x"), Some(0));
+        assert_eq!(result[2].live_in_size(), 0);
     }
 
     #[test]
     fn test_liveness_multiple_uses() {
-        // A: def x; use x; use x
-        let proc = TestProcedure::new("A", &[], &[
-            ("A", instructions! { def ["x"]; use ["x"]; use ["x"] }),
+        // 0: def x; use x; use x
+        let proc = TestProcedure::new(0, &[], &[
+            (0, instructions! { def ["x"]; use ["x"]; use ["x"] }),
         ]);
         let result = liveness(&proc);
-        assert!(!result[proc.cfg.number("A")].live_in("x"));
-        assert_eq!(result[proc.cfg.number("A")].last_use("x"), Some(2));
+        assert!(!result[0].live_in("x"));
+        assert_eq!(result[0].last_use("x"), Some(2));
     }
 }

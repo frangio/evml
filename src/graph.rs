@@ -2,8 +2,18 @@ use std::{mem::replace, num::NonZero};
 
 use crate::utils::{BitSet, ShiftStack};
 
+pub trait Idx: Copy + Eq {
+    fn index(self) -> usize;
+}
+
+impl Idx for usize {
+    fn index(self) -> usize {
+        self
+    }
+}
+
 pub trait Graph {
-    type Node: Copy + Eq;
+    type Node: Idx;
 
     fn node_count(&self) -> usize;
     fn nodes(&self) -> impl Iterator<Item = Self::Node>;
@@ -33,11 +43,6 @@ pub trait Postorder: Graph {
     fn postorder_iter(&self) -> impl DoubleEndedIterator<Item = Self::Node> {
         (0..self.node_count()).map(|i| self.at_postorder(i))
     }
-}
-
-pub trait Numbered: Graph {
-    fn number(&self, node: Self::Node) -> usize;
-    fn numbered(&self, number: usize) -> Self::Node;
 }
 
 impl<G: Graph + ?Sized> Graph for &G {
@@ -90,24 +95,14 @@ impl<G: Postorder + ?Sized> Postorder for &G {
     }
 }
 
-impl<G: Numbered + ?Sized> Numbered for &G {
-    fn number(&self, node: Self::Node) -> usize {
-        (*self).number(node)
-    }
-
-    fn numbered(&self, number: usize) -> Self::Node {
-        (*self).numbered(number)
-    }
-}
-
-pub fn idom<G: EntryNode + Predecessors + Postorder + Numbered>(g: &G) -> Box<[G::Node]> {
+pub fn idom<G: EntryNode + Predecessors + Postorder>(g: &G) -> Box<[G::Node]> {
     let enc = |v: G::Node| NonZero::new(g.postorder(v) + 1);
     let dec = |x: Option<NonZero<usize>>| g.at_postorder(x.map_or(0, NonZero::get) - 1);
 
     let mut parents = vec![None; g.node_count()];
 
     let entry = g.entry();
-    parents[g.number(entry)] = enc(entry);
+    parents[entry.index()] = enc(entry);
 
     let mut changed = true;
     while changed {
@@ -117,23 +112,23 @@ pub fn idom<G: EntryNode + Predecessors + Postorder + Numbered>(g: &G) -> Box<[G
             let mut x = None;
 
             for u in g.predecessors(v) {
-                if parents[g.number(u)].is_some() {
+                if parents[u.index()].is_some() {
                     let mut y = enc(u);
                     if x.is_none() {
                         x = y;
                     } else {
                         while x != y {
                             if x < y {
-                                x = parents[g.number(dec(x))];
+                                x = parents[dec(x).index()];
                             } else {
-                                y = parents[g.number(dec(y))];
+                                y = parents[dec(y).index()];
                             }
                         }
                     }
                 }
             }
 
-            if x != replace(&mut parents[g.number(v)], x) {
+            if x != replace(&mut parents[v.index()], x) {
                 changed = true;
             }
         }
@@ -186,22 +181,14 @@ impl<G: Predecessors> Successors for Transpose<G> {
     }
 }
 
-impl<G: Numbered> Numbered for Transpose<G> {
-    fn number(&self, node: Self::Node) -> usize {
-        self.inner.number(node)
-    }
 
-    fn numbered(&self, number: usize) -> Self::Node {
-        self.inner.numbered(number)
-    }
-}
 
-pub fn cache_predecessors<G: Numbered + Successors>(g: G) -> CachedPredecessors<G> {
+pub fn cache_predecessors<G: Successors>(g: G) -> CachedPredecessors<G> {
     let mut pred_start = vec![0; g.node_count()].into_boxed_slice();
 
     for v in g.nodes() {
         for w in g.successors(v) {
-            let wi = g.number(w);
+            let wi = w.index();
             pred_start[wi] += 1;
         }
     }
@@ -216,7 +203,7 @@ pub fn cache_predecessors<G: Numbered + Successors>(g: G) -> CachedPredecessors<
 
     for v in g.nodes() {
         for w in g.successors(v) {
-            let wi = g.number(w);
+            let wi = w.index();
             pred_start[wi] -= 1;
             pred_nodes[pred_start[wi]].write(v);
         }
@@ -251,31 +238,21 @@ impl<G: ExitNode> ExitNode for CachedPredecessors<G> {
     }
 }
 
-impl<G: Numbered> Numbered for CachedPredecessors<G> {
-    fn number(&self, node: G::Node) -> usize {
-        self.inner.number(node)
-    }
-
-    fn numbered(&self, number: usize) -> G::Node {
-        self.inner.numbered(number)
-    }
-}
-
-impl<G: Numbered> Predecessors for CachedPredecessors<G> {
+impl<G: Graph> Predecessors for CachedPredecessors<G> {
     fn predecessors(&self, node: G::Node) -> impl Iterator<Item = G::Node> {
-        let index = self.inner.number(node);
+        let index = node.index();
         let start = self.pred_start[index];
         let end = self.pred_start.get(index + 1).copied().unwrap_or(self.pred_nodes.len());
         self.pred_nodes[start..end].iter().copied()
     }
 }
 
-pub fn postorder<G: EntryNode + Successors + Numbered>(g: &G) -> Box<[G::Node]> {
+pub fn postorder<G: EntryNode + Successors>(g: &G) -> Box<[G::Node]> {
     let n = g.node_count();
 
     let mut flags = BitSet::new(2 * n);
-    let visited = |v| g.number(v);
-    let seen = |v| n + g.number(v);
+    let visited = |v: G::Node| v.index();
+    let seen = |v: G::Node| n + v.index();
 
     let mut buffer = ShiftStack::new(n);
 
@@ -301,20 +278,18 @@ pub fn postorder<G: EntryNode + Successors + Numbered>(g: &G) -> Box<[G::Node]> 
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use std::hash::Hash;
-    use std::collections::{HashMap, HashSet};
-    use std::iter::zip;
+    use std::collections::HashSet;
 
-    pub struct TestGraph<T> {
-        edges: Vec<(T, T)>,
-        postorder: Vec<T>,
+    pub struct TestGraph {
+        edges: Vec<(usize, usize)>,
+        postorder: Vec<usize>,
     }
 
-    impl<T: Copy + Eq + Hash> TestGraph<T> {
-        pub fn new(start: T, edges: &[(T, T)]) -> Self {
+    impl TestGraph {
+        pub fn new(start: usize, edges: &[(usize, usize)]) -> Self {
             let edges = edges.to_vec();
             let mut postorder = vec![];
-            let mut visited: HashSet<T> = HashSet::new();
+            let mut visited: HashSet<usize> = HashSet::new();
             let mut stack = vec![(start, false)];
             while let Some((node, post)) = stack.pop() {
                 if post {
@@ -333,8 +308,8 @@ pub mod tests {
         }
     }
 
-    impl<T: Copy + Eq + Hash> Graph for TestGraph<T> {
-        type Node = T;
+    impl Graph for TestGraph {
+        type Node = usize;
 
         fn node_count(&self) -> usize {
             self.postorder.len()
@@ -345,165 +320,156 @@ pub mod tests {
         }
     }
 
-    impl<T: Copy + Eq + Hash> Predecessors for TestGraph<T> {
-        fn predecessors(&self, node: T) -> impl Iterator<Item = T> {
+    impl Predecessors for TestGraph {
+        fn predecessors(&self, node: usize) -> impl Iterator<Item = usize> {
             self.edges.iter().filter_map(move |&(u, v)| (v == node).then_some(u))
         }
     }
 
-    impl<T: Copy + Eq + Hash> EntryNode for TestGraph<T> {
-        fn entry(&self) -> T {
+    impl EntryNode for TestGraph {
+        fn entry(&self) -> usize {
             *self.postorder.last().unwrap()
         }
     }
 
-    impl<T: Copy + Eq + Hash> ExitNode for TestGraph<T> {
-        fn exit(&self) -> T {
+    impl ExitNode for TestGraph {
+        fn exit(&self) -> usize {
             *self.postorder.first().unwrap()
         }
     }
 
-    impl<T: Copy + Eq + Hash> Successors for TestGraph<T> {
-        fn successors(&self, node: T) -> impl Iterator<Item = T> {
+    impl Successors for TestGraph {
+        fn successors(&self, node: usize) -> impl Iterator<Item = usize> {
             self.edges.iter().filter_map(move |&(u, v)| (u == node).then_some(v))
         }
     }
 
-    impl<T: Copy + Eq + Hash> Postorder for TestGraph<T> {
-        fn at_postorder(&self, index: usize) -> T {
+    impl Postorder for TestGraph {
+        fn at_postorder(&self, index: usize) -> usize {
             self.postorder[index]
         }
 
-        fn postorder(&self, node: T) -> usize {
+        fn postorder(&self, node: usize) -> usize {
             self.postorder.iter().position(|&n| n == node).unwrap()
         }
     }
 
-    impl<T: Copy + Eq + Hash> Numbered for TestGraph<T> {
-        fn number(&self, node: T) -> usize {
-            self.postorder.iter().position(|&n| n == node).unwrap()
-        }
 
-        fn numbered(&self, number: usize) -> T {
-            self.postorder[number]
-        }
-    }
 
     #[test]
     fn test_cache_predecessors() {
-        // A → B → C
+        // 0 → 1 → 2
         //     ↓
-        //     D
-        let g = TestGraph::new("A", &[
-            ("A", "B"),
-            ("B", "C"),
-            ("B", "D"),
+        //     3
+        let g = TestGraph::new(0, &[
+            (0, 1),
+            (1, 2),
+            (1, 3),
         ]);
         let cached = cache_predecessors(g);
 
-        let preds_a: Vec<_> = cached.predecessors("A").collect();
-        let preds_b: Vec<_> = cached.predecessors("B").collect();
-        let preds_c: Vec<_> = cached.predecessors("C").collect();
-        let preds_d: Vec<_> = cached.predecessors("D").collect();
+        let preds_0: Vec<_> = cached.predecessors(0).collect();
+        let preds_1: Vec<_> = cached.predecessors(1).collect();
+        let preds_2: Vec<_> = cached.predecessors(2).collect();
+        let preds_3: Vec<_> = cached.predecessors(3).collect();
 
-        assert!(preds_a.is_empty());
-        assert_eq!(preds_b, vec!["A"]);
-        assert_eq!(preds_c, vec!["B"]);
-        assert_eq!(preds_d, vec!["B"]);
+        assert!(preds_0.is_empty());
+        assert_eq!(preds_1, vec![0]);
+        assert_eq!(preds_2, vec![1]);
+        assert_eq!(preds_3, vec![1]);
     }
 
     #[test]
     fn test_idom_single_node() {
-        // A
-        let g = TestGraph::new("A", &[]);
+        // 0
+        let g = TestGraph::new(0, &[]);
         let result = idom(&g);
-        let result: HashMap<_, _> = zip(g.postorder, result).collect();
-        assert_eq!(result["A"], "A");
+        assert_eq!(result[0], 0);
     }
 
     #[test]
     fn test_idom_linear() {
-        // A → B → C
-        let g = TestGraph::new("A", &[
-            ("A", "B"),
-            ("B", "C"),
+        // 0 → 1 → 2
+        let g = TestGraph::new(0, &[
+            (0, 1),
+            (1, 2),
         ]);
         let result = idom(&g);
-        let result: HashMap<_, _> = zip(g.postorder, result).collect();
-        assert_eq!(result["B"], "A");
-        assert_eq!(result["C"], "B");
+        assert_eq!(result[0], 0);
+        assert_eq!(result[1], 0);
+        assert_eq!(result[2], 1);
     }
 
     #[test]
     fn test_idom_diamond() {
-        //   A
+        //   0
         //  ↙ ↘
-        // B   C
+        // 1   2
         //  ↘ ↙
-        //   D
-        let g = TestGraph::new("A", &[
-            ("A", "B"),
-            ("A", "C"),
-            ("B", "D"),
-            ("C", "D"),
+        //   3
+        let g = TestGraph::new(0, &[
+            (0, 1),
+            (0, 2),
+            (1, 3),
+            (2, 3),
         ]);
         let result = idom(&g);
-        let result: HashMap<_, _> = zip(g.postorder, result).collect();
-        assert_eq!(result["B"], "A");
-        assert_eq!(result["C"], "A");
-        assert_eq!(result["D"], "A");
+        assert_eq!(result[0], 0);
+        assert_eq!(result[1], 0);
+        assert_eq!(result[2], 0);
+        assert_eq!(result[3], 0);
     }
 
     #[test]
     fn test_idom_simple_loop() {
-        // A → B → C
+        // 0 → 1 → 2
         //     ↑   ↓
         //     └───┘
-        let g = TestGraph::new("A", &[
-            ("A", "B"),
-            ("B", "C"),
-            ("C", "B"),
+        let g = TestGraph::new(0, &[
+            (0, 1),
+            (1, 2),
+            (2, 1),
         ]);
         let result = idom(&g);
-        let result: HashMap<_, _> = zip(g.postorder, result).collect();
-        assert_eq!(result["B"], "A");
-        assert_eq!(result["C"], "B");
+        assert_eq!(result[0], 0);
+        assert_eq!(result[1], 0);
+        assert_eq!(result[2], 1);
     }
 
     #[test]
     fn test_idom_nested_loops() {
-        // A → B → C → D
+        // 0 → 1 → 2 → 3
         //     ↑   ↑   ↓
         //     │   └───┘
         //     └───────┘
-        let g = TestGraph::new("A", &[
-            ("A", "B"),
-            ("B", "C"),
-            ("C", "D"),
-            ("D", "C"),
-            ("D", "B"),
+        let g = TestGraph::new(0, &[
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (3, 2),
+            (3, 1),
         ]);
         let result = idom(&g);
-        let result: HashMap<_, _> = zip(g.postorder, result).collect();
-        assert_eq!(result["B"], "A");
-        assert_eq!(result["C"], "B");
-        assert_eq!(result["D"], "C");
+        assert_eq!(result[0], 0);
+        assert_eq!(result[1], 0);
+        assert_eq!(result[2], 1);
+        assert_eq!(result[3], 2);
     }
 
     #[test]
     fn test_idom_irreducible() {
-        //   A
+        //   0
         //  ↙ ↘
-        // B ↔ C
-        let g = TestGraph::new("A", &[
-            ("A", "B"),
-            ("A", "C"),
-            ("B", "C"),
-            ("C", "B"),
+        // 1 ↔ 2
+        let g = TestGraph::new(0, &[
+            (0, 1),
+            (0, 2),
+            (1, 2),
+            (2, 1),
         ]);
         let result = idom(&g);
-        let result: HashMap<_, _> = zip(g.postorder, result).collect();
-        assert_eq!(result["B"], "A");
-        assert_eq!(result["C"], "A");
+        assert_eq!(result[0], 0);
+        assert_eq!(result[1], 0);
+        assert_eq!(result[2], 0);
     }
 }
