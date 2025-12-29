@@ -59,6 +59,8 @@ macro_rules! generate_ids {
 #[cfg(test)]
 pub(crate) use generate_ids;
 
+use crate::utils::exact_size_chain;
+
 pub mod ast {
     use revm::primitives::U256;
 
@@ -151,6 +153,26 @@ pub mod asm {
 
 pub fn assemble(code: &[asm::Instr]) -> Vec<u8> {
     use asm::Instr::*;
+
+    const MAX_CODE_SIZE: usize = 24 * 1024;
+
+    let mut label_offsets: HashMap<Id, usize> = HashMap::new();
+    let mut pc = 0usize;
+    for instr in code {
+        match instr {
+            JumpDest(id) => {
+                if label_offsets.insert(*id, pc).is_some() {
+                    panic!("duplicate label");
+                }
+                pc += 1;
+            }
+            Push(value) => pc += instruction_push(value.to_be_bytes::<32>()).len(),
+            PushLabel(_id) => pc += 3,
+            Pop | JumpIf | Jump | Stop | Op(_) | Swap(_) | Dup(_) => pc += 1,
+        }
+    }
+    assert!(pc <= MAX_CODE_SIZE, "bytecode too large");
+
     let mut bytecode = Vec::with_capacity(code.len());
     for instr in code {
         match instr {
@@ -159,8 +181,17 @@ pub fn assemble(code: &[asm::Instr]) -> Vec<u8> {
             Swap(depth) => bytecode.push(opcode_swap(*depth)),
             Dup(depth) => bytecode.push(opcode_dup(*depth)),
             Op(op) => bytecode.push(*op),
-            JumpDest(_id) => todo!(),
-            PushLabel(_id) => todo!(),
+            JumpDest(id) => {
+                let expected = label_offsets[id];
+                assert!(bytecode.len() == expected);
+                bytecode.push(opcode::JUMPDEST);
+            }
+            PushLabel(id) => {
+                let offset = label_offsets[id];
+                let offset: u16 = offset.try_into().unwrap();
+                bytecode.push(opcode::PUSH2);
+                bytecode.extend(offset.to_be_bytes());
+            }
             JumpIf => bytecode.push(opcode::JUMPI),
             Jump => bytecode.push(opcode::JUMP),
             Stop => bytecode.push(opcode::STOP),
@@ -180,11 +211,14 @@ fn opcode_dup(depth: usize) -> u8 {
     opcode::DUP1 + depth as u8
 }
 
-fn instruction_push<const N: usize>(value: [u8; N]) -> impl Iterator<Item = u8> {
+fn instruction_push<const N: usize>(value: [u8; N]) -> impl ExactSizeIterator<Item = u8> {
     assert!(N <= 32);
     let mut value = value.into_iter().peekable();
     while value.next_if_eq(&0).is_some() {}
-    once(opcode::PUSH0 + value.len() as u8).chain(value)
+    exact_size_chain(
+        once(opcode::PUSH0 + value.len() as u8),
+        value,
+    )
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

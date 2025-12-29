@@ -10,6 +10,9 @@ fn disasm(code: &[u8]) -> String {
     while let pos = iter.position() && pos < code.len() {
         let opcode = iter.peek_opcode().unwrap();
         let name = opcode.as_str();
+        if name == "JUMPDEST" {
+            asm.push_str(&format!("[{pos}:] "));
+        }
         asm.push_str(name);
         let imm = opcode.info().immediate_size() as usize;
         if imm > 0 {
