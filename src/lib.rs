@@ -35,6 +35,7 @@ impl Id {
     const ROOT: Self = Id(IdReserve::Root.into_non_zero());
 }
 
+#[cfg_attr(test, derive(Clone))]
 pub struct IdGen(NonZeroUsize);
 
 impl IdGen {

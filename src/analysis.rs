@@ -1,4 +1,4 @@
-use std::{collections::HashMap, hash::Hash};
+use std::{cmp::Ordering, collections::HashMap, hash::Hash};
 
 use crate::graph::{ArrayNodeOrdering, EntryNode, ExitNode, Graph, Idx, NodeOrdering, Predecessors, Successors, Transpose, cache_predecessors, idom, postorder, transpose};
 
@@ -45,17 +45,23 @@ impl<P: Procedure> BlockLiveness<P> {
     }
 
     pub fn live_out(&self, var: P::VarId) -> bool {
-        self.map[&var].last_use.is_none()
+        self.map.get(&var).is_some_and(|l| l.last_use.is_none())
     }
 
     pub fn last_use(&self, var: P::VarId) -> Option<P::InstrIdx> {
         self.map[&var].last_use
     }
 
+    pub fn last_use_cmp(&self, var: P::VarId, instr: P::InstrIdx) -> Ordering
+    where
+        P::InstrIdx: Ord,
+    {
+        self.map.get(&var).map_or(Ordering::Less, |l| l.last_use.map_or(Ordering::Greater, |u| u.cmp(&instr)))
+    }
+
     pub fn live_in_size(&self) -> usize {
         self.in_size
     }
-
 }
 
 /// Returns liveness info for each variable per block.
@@ -98,7 +104,7 @@ pub fn liveness<P: Procedure>(proc: &P, postorder: &impl NodeOrdering<P::BlockId
                             }
                             info.live_in = false;
                         })
-                        .or_insert(VarLiveness { live_in: false, last_use: None });
+                        .or_insert(VarLiveness { live_in: false, last_use: Some(i) });
                 }
             }
         }

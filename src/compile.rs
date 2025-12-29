@@ -20,7 +20,7 @@ fn size_of(expr: &core::Expr) -> usize {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Stack(Vec<Option<Id>>);
 struct StackEntry<'a> {
     stack: &'a mut Stack,
@@ -113,16 +113,18 @@ pub fn compile(block: core::Block, ids: &mut IdGen) -> Vec<asm::Instr> {
         let ipdom = proc.ipdom[block_id.index()];
         let ipdom_liveness = &analysis.liveness[ipdom.index()];
 
-        let live_out = |x| liveness.last_use(x).is_none_or(|i| i == InstrIdx::Cont);
+        let target_input = |label| proc.labeled_block(label).data.input;
 
-        compile_cont(block.data.cont, stack, live_out, ipdom_liveness, &mut code);
+        compile_cont(block.data.cont, stack, liveness, ipdom_liveness, target_input, &mut code);
 
         let (_, stack) = stack_entry.remove_entry();
         let succs = proc.successor_blocks(block_id);
         let stack = repeat_n(stack, succs.len());
         for (succ, stack) in zip(succs, stack) {
             let prev_stack = stacks.insert(succ, stack);
-            assert!(prev_stack.is_none());
+            if let Some(prev_stack) = prev_stack {
+                debug_assert_eq!(prev_stack, stacks[&succ]);
+            }
         }
     }
 
@@ -145,21 +147,27 @@ fn compile_prior(
 fn compile_cont(
     cont: Cont,
     stack: &mut Stack,
-    live_out: impl Fn(Id) -> bool,
+    liveness: &BlockLiveness,
     ipdom_liveness: &BlockLiveness,
+    target_input: impl Fn(Id) -> Option<Id>,
     code: &mut Vec<asm::Instr>,
 ) {
     use core::*;
     use asm::*;
 
-    let stash_start = stack.len() - 1 - ipdom_liveness.live_in_size();
+    let res_size = match cont {
+        Cont::Stop(res) | Cont::Jump(_, res) => res.map_or(0, |_| 1),
+        Cont::JumpIf { .. } => 0,
+    };
+
+    let stash_start = stack.len() - 1 - ipdom_liveness.live_in_size() + res_size;
     let mut next_avail = stash_start;
     let mut popped = 0;
 
     for d in 0..stash_start {
         let d = d - popped;
         let x = stack.read(d);
-        if !live_out(x) {
+        if liveness.last_use_cmp(x, InstrIdx::Cont).is_lt() {
             if d > 0 {
                 code.push(Instr::Swap(d));
                 stack.swap(d);
@@ -183,17 +191,10 @@ fn compile_cont(
         }
     }
 
-    if let Cont::Stop(res) | Cont::Jump(_, res) = cont {
-        assert!(res.is_none() || Some(&res) == stack.0.last());
-        let res_size = res.map_or(0, |_| 1);
-        let stack_size = stack.len();
-        if stack_size > res_size {
-            let excess = stack_size - res_size;
-            code.extend(repeat_n([Instr::Swap(excess), Instr::Pop], res_size).flatten());
-            if excess > res_size {
-                code.extend(repeat_n(Instr::Pop, excess - res_size));
-            }
-        }
+    if let Cont::Jump(target, Some(res)) = cont {
+        assert!(res == stack.read(0));
+        stack.popn(1);
+        stack.push(target_input(target));
     }
 
     match cont {
@@ -207,7 +208,8 @@ fn compile_cont(
         }
 
         Cont::JumpIf { cond, then } => {
-            compile_val_onto(&Val::Var(cond), stack, |e| !live_out(e.var()), code);
+            let should_swap = |e: &StackEntry| liveness.last_use(e.var()) == Some(InstrIdx::Cont);
+            compile_val_onto(&Val::Var(cond), stack, should_swap, code);
             code.push(Instr::PushLabel(then));
             code.push(Instr::JumpIf);
         }
@@ -347,6 +349,11 @@ struct IndexedBlockRef<'a> {
 impl IndexedProc {
     fn block(&self, block_id: CfgId) -> IndexedBlockRef<'_> {
         IndexedBlockRef { proc: self, data: &self.blocks[block_id.index()] }
+    }
+
+    fn labeled_block(&self, label: Id) -> IndexedBlockRef<'_> {
+        let block_index = self.labeled_blocks[&label];
+        IndexedBlockRef { proc: self, data: &self.blocks[block_index] }
     }
 
     fn fallthrough(&self, block_id: CfgId) -> Option<CfgId> {
@@ -630,7 +637,7 @@ impl Successors for IndexedProc {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum InstrIdx {
     Input,
     Prior(usize),
@@ -784,7 +791,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_compile_if_then_else_tail() {
         let mut ids = IdGen::new();
         generate_ids!(ids => x);
@@ -800,7 +806,7 @@ mod tests {
                 ]),
             ),
         };
-        let code = compile(block, &mut ids);
+        let code = compile(block, &mut ids.clone());
         generate_ids!(ids => label);
         assert_eq!(code, vec![
             Push(U256::from(2)),
@@ -815,13 +821,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_compile_if_then_else_prior() {
         let mut ids = IdGen::new();
         generate_ids!(ids => x, y);
         let block = Block {
             priors: vec![
-                Let(Some(x), Val(Const(U256::from(1)))),
+                Let(Some(x), Val(Const(U256::from(2)))),
                 Let(Some(y), IfThenElse(
                     Var(x),
                     Box::new([
@@ -832,19 +837,23 @@ mod tests {
             ],
             tail: Val(Var(y)),
         };
-        let code = compile(block, &mut ids);
+        let code = compile(block, &mut ids.clone());
         generate_ids!(ids => label1, label2);
         assert_eq!(code, vec![
-            Push(U256::from(1)),
-            PushLabel(label1),
-            Swap(1),
+            Push(U256::from(2)),
+            PushLabel(label2),
             JumpIf,
             Push(U256::from(0)),
-            PushLabel(label2),
+            PushLabel(label1),
             Jump,
-            JumpDest(label1),
-            Push(U256::from(1)),
             JumpDest(label2),
+            Push(U256::from(1)),
+
+            // TODO: remove redundant jump
+            PushLabel(label1),
+            Jump,
+
+            JumpDest(label1),
             Stop,
         ]);
     }
