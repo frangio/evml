@@ -70,6 +70,7 @@ pub mod ast {
     pub enum Expr<T> {
         Val(Val<T>),
         Op(u8, Vec<Val<T>>),
+        IfThenElse(Box<(Expr<T>, [Block<T>; 2])>),
     }
 
     pub enum BlockPrior<T> {
@@ -193,10 +194,11 @@ enum Type {
 
 pub fn type_check(block: &ast::Block<Id>) -> Result<()> {
     let env = HashMap::new();
-    type_check_block(block, env)
+    type_check_block(block, env)?;
+    Ok(())
 }
 
-fn type_check_block(block: &ast::Block<Id>, mut env: HashMap<Id, Type>) -> Result<()> {
+fn type_check_block(block: &ast::Block<Id>, mut env: HashMap<Id, Type>) -> Result<usize> {
     use ast::*;
     for prior in &block.priors {
         match prior {
@@ -211,9 +213,7 @@ fn type_check_block(block: &ast::Block<Id>, mut env: HashMap<Id, Type>) -> Resul
         }
     }
 
-    type_check_expr(&block.tail, &env)?;
-
-    Ok(())
+    type_check_expr(&block.tail, &env)
 }
 
 fn type_check_expr(expr: &ast::Expr<Id>, env: &HashMap<Id, Type>) -> Result<usize> {
@@ -236,28 +236,67 @@ fn type_check_expr(expr: &ast::Expr<Id>, env: &HashMap<Id, Type>) -> Result<usiz
             }
             Ok(info.outputs)
         }
+
+        Expr::IfThenElse(cond_then_else) => {
+            let (cond, then_else) = cond_then_else.as_ref();
+            let outputs = type_check_expr(cond, env)?;
+            ensure!(outputs == 1, "if condition must be a value");
+            let then_outputs = type_check_block(&then_else[0], env.clone())?;
+            let else_outputs = type_check_block(&then_else[1], env.clone())?;
+            ensure!(then_outputs == else_outputs, "if branches return different stack sizes");
+            Ok(then_outputs)
+        }
     }
 }
 
-pub fn lower(block: ast::Block<Id>) -> core::Block {
-    let priors = block.priors.into_iter().map(|prior| {
+pub fn lower(block: ast::Block<Id>, ids: &mut IdGen) -> core::Block {
+    lower_block(block, ids)
+}
+
+fn lower_block(block: ast::Block<Id>, ids: &mut IdGen) -> core::Block {
+    let mut priors = Vec::with_capacity(block.priors.len());
+
+    for prior in block.priors {
         match prior {
             ast::BlockPrior::Let(x, expr) => {
-                core::BlockPrior::Let(x, lower_expr(expr))
+                let expr = lower_expr(expr, &mut priors, ids);
+                priors.push(core::BlockPrior::Let(x, expr));
             }
         }
-    }).collect();
+    }
 
-    let tail = lower_expr(block.tail);
+    let tail = lower_expr(block.tail, &mut priors, ids);
 
     core::Block { priors, tail }
 }
 
-fn lower_expr(expr: ast::Expr<Id>) -> core::Expr {
+fn lower_expr(
+    expr: ast::Expr<Id>,
+    priors: &mut Vec<core::BlockPrior>,
+    ids: &mut IdGen,
+) -> core::Expr {
     match expr {
         ast::Expr::Val(val) => core::Expr::Val(lower_val(val)),
         ast::Expr::Op(op, vals) => {
             core::Expr::Op(op, vals.into_iter().map(lower_val).collect())
+        }
+        ast::Expr::IfThenElse(cond_then_else) => {
+            let (cond, then_else) = *cond_then_else;
+            let cond = match lower_expr(cond, priors, ids) {
+                core::Expr::Val(val) => val,
+                expr => {
+                    let x = ids.generate();
+                    priors.push(core::BlockPrior::Let(Some(x), expr));
+                    core::Val::Var(x)
+                }
+            };
+            let [then_block, else_block] = then_else;
+            let then_block = lower_block(then_block, ids);
+            let else_block = lower_block(else_block, ids);
+            core::Expr::IfThenElse(
+                cond,
+                Box::new([then_block, else_block]),
+            )
         }
     }
 }
@@ -286,7 +325,7 @@ fn resolve_block<'a>(
     for prior in &block.priors {
         match prior {
             BlockPrior::Let(x, expr) => {
-                let expr = resolve_expr(expr, &env)?;
+                let expr = resolve_expr(expr, ids, &env)?;
                 let y = x.as_ref().map(|x| {
                     let y = ids.generate();
                     env.insert(x, y);
@@ -298,18 +337,30 @@ fn resolve_block<'a>(
         }
     }
 
-    let tail = resolve_expr(&block.tail, &env)?;
+    let tail = resolve_expr(&block.tail, ids, &env)?;
 
     Ok(Block { priors, tail })
 }
 
-fn resolve_expr(expr: &ast::Expr<&str>, env: &HashMap<&str, Id>) -> Result<ast::Expr<Id>> {
+fn resolve_expr(
+    expr: &ast::Expr<&str>,
+    ids: &mut IdGen,
+    env: &HashMap<&str, Id>,
+) -> Result<ast::Expr<Id>> {
     use ast::*;
     Ok(match expr {
         Expr::Val(val) => Expr::Val(resolve_val(val, env)?),
         Expr::Op(op, vals) => {
             let vals = vals.iter().map(|val| resolve_val(val, env)).collect::<Result<_>>()?;
             Expr::Op(*op, vals)
+        }
+        Expr::IfThenElse(cond_then_else) => {
+            let (cond, then_else) = cond_then_else.as_ref();
+            let cond = resolve_expr(cond, ids, env)?;
+            let [then_block, else_block] = then_else;
+            let then_block = resolve_block(then_block, ids, env.clone())?;
+            let else_block = resolve_block(else_block, ids, env.clone())?;
+            Expr::IfThenElse(Box::new((cond, [then_block, else_block])))
         }
     })
 }
@@ -346,47 +397,63 @@ pub fn parse(source: &str) -> Result<ast::Block<&str>> {
             val_var,
         )).padded();
 
-        let expr_val = val.map(Expr::Val);
+        let block = recursive(|block| {
+            let expr = recursive(|expr| {
+                let expr_val = val.clone().map(Expr::Val);
 
-        let expr_op = just('@')
-            .ignore_then(text::ident())
-            .try_map(|opcode_name: &str, span| {
-                opcodes::lookup(opcode_name)
-                    .ok_or_else(|| Rich::custom(span, format!("unknown opcode {opcode_name}")))
-            })
-            .then(
-                val.separated_by(just(','))
-                    .collect::<Vec<_>>()
-                    .delimited_by(just('('), just(')'))
-            )
-            .map(|(op, args)| Expr::Op(op, args));
+                let expr_op = just('@')
+                    .ignore_then(text::ident())
+                    .try_map(|opcode_name: &str, span| {
+                        opcodes::lookup(opcode_name)
+                            .ok_or_else(|| Rich::custom(span, format!("unknown opcode {opcode_name}")))
+                    })
+                    .then(
+                        val.separated_by(just(','))
+                            .collect::<Vec<_>>()
+                            .delimited_by(just('('), just(')'))
+                    )
+                    .map(|(op, args)| Expr::Op(op, args));
 
-        let expr = choice((
-            expr_op,
-            expr_val,
-        )).padded();
+                let expr_if = text::keyword("if")
+                    .padded()
+                    .ignore_then(expr.clone())
+                    .then(block.clone().delimited_by(just('{'), just('}')).padded())
+                    .then_ignore(text::keyword("else").padded())
+                    .then(block.clone().delimited_by(just('{'), just('}')).padded())
+                    .map(|((cond, then_block), else_block)| {
+                        Expr::IfThenElse(Box::new((cond, [then_block, else_block])))
+                    });
 
-        let block_let = text::keyword("let")
-            .padded()
-            .ignore_then(
                 choice((
-                    just('_').to(None),
-                    text::ident().map(Some),
+                    expr_if,
+                    expr_op,
+                    expr_val,
                 ))
-            )
-            .padded()
-            .then_ignore(just('='))
-            .then(expr.clone())
-            .then_ignore(just(';'))
-            .map(|(x, e)| BlockPrior::Let(x, e));
+                .padded()
+            });
 
-        let block = block_let
-            .padded()
-            .repeated()
-            .collect()
-            .then(expr)
-            .padded()
-            .map(|(priors, tail)| Block { priors, tail });
+            let block_let = text::keyword("let")
+                .padded()
+                .ignore_then(
+                    choice((
+                        just('_').to(None),
+                        text::ident().map(Some),
+                    ))
+                )
+                .padded()
+                .then_ignore(just('='))
+                .then(expr.clone())
+                .then_ignore(just(';'))
+                .map(|(x, e)| BlockPrior::Let(x, e));
+
+            block_let
+                .padded()
+                .repeated()
+                .collect()
+                .then(expr)
+                .padded()
+                .map(|(priors, tail)| Block { priors, tail })
+        });
 
         block.then_ignore(end())
     }
@@ -526,5 +593,25 @@ mod tests {
             tail: Val(Const(U256::from(0))),
         };
         assert!(type_check(&block).is_err());
+    }
+
+    #[test]
+    fn test_parse_if_then_else() {
+        let source = "let c = 1; if c { @add(c, 1) } else { c }";
+        let block = parse(source).expect("parse failed");
+        let mut ids = IdGen::new();
+        let resolved = resolve(&block, &mut ids).expect("resolve failed");
+        type_check(&resolved).expect("type check failed");
+        let _lowered = lower(resolved, &mut ids);
+    }
+
+    #[test]
+    fn test_parse_if_then_else_expr_cond() {
+        let source = "let c = 1; if @eq(c, 1) { 2 } else { 3 }";
+        let block = parse(source).expect("parse failed");
+        let mut ids = IdGen::new();
+        let resolved = resolve(&block, &mut ids).expect("resolve failed");
+        type_check(&resolved).expect("type check failed");
+        let _lowered = lower(resolved, &mut ids);
     }
 }

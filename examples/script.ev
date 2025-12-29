@@ -1,3 +1,7 @@
-let a = 1;
-let b = 2;
-@add(a, b)
+let a = 9;
+let b = 14;
+if @gt(a, b) {
+  @sub(a, b)
+} else {
+  @sub(b, a)
+}

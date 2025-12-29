@@ -32,7 +32,7 @@ fn main() -> Result<()> {
     let ast = parse(&source)?;
     let ast = resolve(&ast, &mut ids)?;
     type_check(&ast)?;
-    let ir = lower(ast);
+    let ir = lower(ast, &mut ids);
     let code = compile(ir, &mut ids);
     let bytecode = assemble(&code);
 
