@@ -115,7 +115,15 @@ pub fn compile(block: core::Block, ids: &mut IdGen) -> Vec<asm::Instr> {
 
         let target_input = |label| proc.labeled_block(label).data.input;
 
-        compile_cont(block.data.cont, stack, liveness, ipdom_liveness, target_input, &mut code);
+        compile_cont(
+            block.data.cont,
+            stack,
+            liveness,
+            ipdom_liveness,
+            target_input,
+            proc.fallthrough(block_id).and_then(|i| proc.blocks[i.index()].label),
+            &mut code,
+        );
 
         let (_, stack) = stack_entry.remove_entry();
         let succs = proc.successor_blocks(block_id);
@@ -150,6 +158,7 @@ fn compile_cont(
     liveness: &BlockLiveness,
     ipdom_liveness: &BlockLiveness,
     target_input: impl Fn(Id) -> Option<Id>,
+    fallthrough_target: Option<Id>,
     code: &mut Vec<asm::Instr>,
 ) {
     use core::*;
@@ -203,8 +212,10 @@ fn compile_cont(
         }
 
         Cont::Jump(target, _) => {
-            code.push(Instr::PushLabel(target));
-            code.push(Instr::Jump);
+            if Some(target) != fallthrough_target {
+                code.push(Instr::PushLabel(target));
+                code.push(Instr::Jump);
+            }
         }
 
         Cont::JumpIf { cond, then } => {
@@ -357,8 +368,8 @@ impl IndexedProc {
     }
 
     fn fallthrough(&self, block_id: CfgId) -> Option<CfgId> {
-        let po = self.postorder();
-        po.position(block_id).checked_sub(1).map(|i| po.node_at(i))
+        assert!(block_id != self.exit());
+        block_id.index().checked_sub(1).map(CfgId::new)
     }
 
     fn successor_blocks(&self, block_id: CfgId) -> impl ExactSizeIterator<Item = CfgId> {
@@ -848,11 +859,6 @@ mod tests {
             Jump,
             JumpDest(label2),
             Push(U256::from(1)),
-
-            // TODO: remove redundant jump
-            PushLabel(label1),
-            Jump,
-
             JumpDest(label1),
             Stop,
         ]);
