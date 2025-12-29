@@ -352,11 +352,6 @@ enum Cont {
     JumpIf { cond: Id, then: Id },
 }
 
-struct IndexedBlockRef<'a> {
-    proc: &'a IndexedProc,
-    data: &'a IndexedBlock,
-}
-
 impl IndexedProc {
     fn block(&self, block_id: CfgId) -> IndexedBlockRef<'_> {
         IndexedBlockRef { proc: self, data: &self.blocks[block_id.index()] }
@@ -390,6 +385,17 @@ impl IndexedProc {
     }
 }
 
+struct IndexedBlockRef<'a> {
+    proc: &'a IndexedProc,
+    data: &'a IndexedBlock,
+}
+
+impl<'a> IndexedBlockRef<'a> {
+    fn priors(&self) -> &'a [core::BlockPrior] {
+        &self.proc.segments[self.data.segment][self.data.start..self.data.end]
+    }
+}
+
 pub struct IndexedProcPostorder {
     block_count: usize,
 }
@@ -420,12 +426,6 @@ impl NodeOrdering<CfgId> for IndexedProcPostorder {
             [CfgId::new(self.block_count)],
             (0..self.block_count).map(CfgId::new),
         )
-    }
-}
-
-impl<'a> IndexedBlockRef<'a> {
-    fn priors(&self) -> &'a [core::BlockPrior] {
-        &self.proc.segments[self.data.segment][self.data.start..self.data.end]
     }
 }
 
