@@ -8,7 +8,7 @@ use std::slice;
 use crate::utils::exact_size_chain;
 use crate::{Id, IdGen, asm, core, opcodes};
 use crate::analysis::{self, Cfg, DefUse, Procedure, ipdom, liveness};
-use crate::graph::{EntryNode, ExitNode, Graph, Idx, Postorder, Successors};
+use crate::graph::{EntryNode, ExitNode, Graph, Idx, IdxNodeOrdering, NodeOrdering, Successors};
 
 fn size_of(expr: &core::Expr) -> usize {
     use core::*;
@@ -96,7 +96,7 @@ pub fn compile(block: core::Block, ids: &mut IdGen) -> Vec<asm::Instr> {
 
     let mut code = vec![];
 
-    for block_id in proc.postorder_iter().skip(1).rev() {
+    for block_id in proc.postorder().iter().skip(1).rev() {
         let block = proc.block(block_id);
         if let Some(label) = block.data.label {
             code.push(asm::Instr::JumpDest(label));
@@ -297,7 +297,7 @@ struct Analysis {
 }
 
 fn analyze(proc: &IndexedProc) -> Analysis {
-    let liveness = liveness(proc);
+    let liveness = liveness(proc, &proc.postorder());
     Analysis { liveness }
 }
 
@@ -305,6 +305,10 @@ fn analyze(proc: &IndexedProc) -> Analysis {
 struct BlockId(NonZero<usize>);
 
 impl Idx for BlockId {
+    fn new(index: usize) -> Self {
+        BlockId(NonZero::new(index + 1).unwrap())
+    }
+
     fn index(self) -> usize {
         self.0.get() - 1
     }
@@ -345,7 +349,12 @@ impl IndexedProc {
     }
 
     fn fallthrough(&self, block_id: BlockId) -> BlockId {
-        self.at_postorder(self.postorder(block_id) - 1)
+        let po = self.postorder();
+        po.node_at(po.position(block_id) - 1)
+    }
+
+    fn postorder(&self) -> IdxNodeOrdering<BlockId> {
+        IdxNodeOrdering::new(self.blocks.len() + 1)
     }
 }
 
@@ -547,7 +556,7 @@ impl Graph for IndexedProc {
     }
 
     fn nodes(&self) -> impl Iterator<Item = Self::Node> {
-        self.postorder_iter()
+        self.postorder().iter()
     }
 }
 
@@ -560,26 +569,6 @@ impl EntryNode for IndexedProc {
 impl ExitNode for IndexedProc {
     fn exit(&self) -> BlockId {
         BlockId(NonZero::new(1).unwrap())
-    }
-}
-
-
-
-impl Postorder for IndexedProc {
-    fn postorder(&self, node: BlockId) -> usize {
-        let index = node.0.get() - 1;
-        assert!(index <= self.blocks.len());
-        index
-    }
-
-    fn at_postorder(&self, index: usize) -> BlockId {
-        assert!(index <= self.blocks.len());
-        BlockId(NonZero::new(index + 1).unwrap())
-    }
-
-    #[allow(refining_impl_trait)]
-    fn postorder_iter(&self) -> impl DoubleEndedIterator<Item = Self::Node> + ExactSizeIterator {
-        (1..self.blocks.len() + 2).map(|i| BlockId(NonZero::new(i).unwrap()))
     }
 }
 

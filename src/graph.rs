@@ -1,12 +1,17 @@
-use std::{mem::replace, num::NonZero};
+use std::{marker::PhantomData, mem::replace, num::NonZero};
 
 use crate::utils::{BitSet, ShiftStack};
 
 pub trait Idx: Copy + Eq {
+    fn new(index: usize) -> Self;
     fn index(self) -> usize;
 }
 
 impl Idx for usize {
+    fn new(index: usize) -> Self {
+        index
+    }
+
     fn index(self) -> usize {
         self
     }
@@ -27,7 +32,6 @@ pub trait ExitNode: Graph {
     fn exit(&self) -> Self::Node;
 }
 
-
 pub trait Predecessors: Graph {
     fn predecessors(&self, node: Self::Node) -> impl Iterator<Item = Self::Node>;
 }
@@ -36,12 +40,67 @@ pub trait Successors: Graph {
     fn successors(&self, node: Self::Node) -> impl Iterator<Item = Self::Node>;
 }
 
-pub trait Postorder: Graph {
-    fn postorder(&self, node: Self::Node) -> usize;
-    fn at_postorder(&self, index: usize) -> Self::Node;
+pub trait NodeOrdering<N> {
+    fn position(&self, node: N) -> usize;
+    fn node_at(&self, position: usize) -> N;
+    fn iter(&self) -> impl DoubleEndedIterator<Item = N> + ExactSizeIterator;
+}
 
-    fn postorder_iter(&self) -> impl DoubleEndedIterator<Item = Self::Node> {
-        (0..self.node_count()).map(|i| self.at_postorder(i))
+pub struct IdxNodeOrdering<N> {
+    len: usize,
+    _phantom: PhantomData<fn() -> N>,
+}
+
+impl<N: Idx> IdxNodeOrdering<N> {
+    pub fn new(len: usize) -> Self {
+        Self { len, _phantom: PhantomData }
+    }
+}
+
+impl<N: Idx> NodeOrdering<N> for IdxNodeOrdering<N> {
+    fn position(&self, node: N) -> usize {
+        let position = node.index();
+        assert!(position < self.len);
+        position
+    }
+
+    fn node_at(&self, position: usize) -> N {
+        assert!(position < self.len);
+        N::new(position)
+    }
+
+    #[allow(refining_impl_trait)]
+    fn iter(&self) -> impl DoubleEndedIterator<Item = N> + ExactSizeIterator + use<N> {
+        (0..self.len).map(N::new)
+    }
+}
+
+pub struct ArrayNodeOrdering<N: Idx> {
+    nodes: Box<[N]>,
+    positions: Box<[usize]>,
+}
+
+impl<N: Idx> ArrayNodeOrdering<N> {
+    pub fn new(nodes: Box<[N]>) -> Self {
+        let mut positions = vec![0; nodes.len()].into_boxed_slice();
+        for (pos, &node) in nodes.iter().enumerate() {
+            positions[node.index()] = pos;
+        }
+        Self { nodes, positions }
+    }
+}
+
+impl<N: Idx> NodeOrdering<N> for ArrayNodeOrdering<N> {
+    fn position(&self, node: N) -> usize {
+        self.positions[node.index()]
+    }
+
+    fn node_at(&self, position: usize) -> N {
+        self.nodes[position]
+    }
+
+    fn iter(&self) -> impl DoubleEndedIterator<Item = N> + ExactSizeIterator {
+        self.nodes.iter().copied()
     }
 }
 
@@ -81,23 +140,9 @@ impl<G: Successors + ?Sized> Successors for &G {
     }
 }
 
-impl<G: Postorder + ?Sized> Postorder for &G {
-    fn at_postorder(&self, index: usize) -> Self::Node {
-        (*self).at_postorder(index)
-    }
-
-    fn postorder(&self, node: Self::Node) -> usize {
-        (*self).postorder(node)
-    }
-
-    fn postorder_iter(&self) -> impl DoubleEndedIterator<Item = Self::Node> {
-        (*self).postorder_iter()
-    }
-}
-
-pub fn idom<G: EntryNode + Predecessors + Postorder>(g: &G) -> Box<[G::Node]> {
-    let enc = |v: G::Node| NonZero::new(g.postorder(v) + 1);
-    let dec = |x: Option<NonZero<usize>>| g.at_postorder(x.map_or(0, NonZero::get) - 1);
+pub fn idom<G: EntryNode + Predecessors>(g: &G, postorder: &impl NodeOrdering<G::Node>) -> Box<[G::Node]> {
+    let enc = |v: G::Node| NonZero::new(postorder.position(v) + 1);
+    let dec = |x: Option<NonZero<usize>>| postorder.node_at(x.map_or(0, NonZero::get) - 1);
 
     let mut parents = vec![None; g.node_count()];
 
@@ -108,7 +153,7 @@ pub fn idom<G: EntryNode + Predecessors + Postorder>(g: &G) -> Box<[G::Node]> {
     while changed {
         changed = false;
 
-        for v in g.postorder_iter().rev().skip(1) {
+        for v in postorder.iter().rev().skip(1) {
             let mut x = None;
 
             for u in g.predecessors(v) {
@@ -238,6 +283,12 @@ impl<G: ExitNode> ExitNode for CachedPredecessors<G> {
     }
 }
 
+impl<G: Successors> Successors for CachedPredecessors<G> {
+    fn successors(&self, node: Self::Node) -> impl Iterator<Item = Self::Node> {
+        self.inner.successors(node)
+    }
+}
+
 impl<G: Graph> Predecessors for CachedPredecessors<G> {
     fn predecessors(&self, node: G::Node) -> impl Iterator<Item = G::Node> {
         let index = node.index();
@@ -247,7 +298,7 @@ impl<G: Graph> Predecessors for CachedPredecessors<G> {
     }
 }
 
-pub fn postorder<G: EntryNode + Successors>(g: &G) -> Box<[G::Node]> {
+pub fn postorder<G: EntryNode + Successors>(g: G) -> ArrayNodeOrdering<G::Node> {
     let n = g.node_count();
 
     let mut flags = BitSet::new(2 * n);
@@ -272,39 +323,34 @@ pub fn postorder<G: EntryNode + Successors>(g: &G) -> Box<[G::Node]> {
         }
     }
 
-    buffer.into_boxed_slice()
+    ArrayNodeOrdering::new(buffer.into_boxed_slice())
 }
 
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use std::collections::HashSet;
+    use std::iter::chain;
 
     pub struct TestGraph {
-        edges: Vec<(usize, usize)>,
-        postorder: Vec<usize>,
+        pub node_count: usize,
+        pub edges: Vec<(usize, usize)>,
+        pub postorder: ArrayNodeOrdering<usize>,
     }
 
     impl TestGraph {
         pub fn new(start: usize, edges: &[(usize, usize)]) -> Self {
+            let node_count = chain(
+                [start],
+                edges.iter().flat_map(|&(v, w)| [v, w]),
+            ).max().map_or(0, |c| c + 1);
             let edges = edges.to_vec();
-            let mut postorder = vec![];
-            let mut visited: HashSet<usize> = HashSet::new();
-            let mut stack = vec![(start, false)];
-            while let Some((node, post)) = stack.pop() {
-                if post {
-                    postorder.push(node);
-                } else if visited.insert(node) {
-                    stack.push((node, true));
-                    for &(u, v) in &edges {
-                        if u == node {
-                            stack.push((v, false));
-                        }
-                    }
-                }
-            }
-
-            Self { edges, postorder }
+            let mut graph = Self {
+                node_count,
+                edges,
+                postorder: ArrayNodeOrdering::new(vec![start].into_boxed_slice()),
+            };
+            graph.postorder = postorder(&graph);
+            graph
         }
     }
 
@@ -312,11 +358,11 @@ pub mod tests {
         type Node = usize;
 
         fn node_count(&self) -> usize {
-            self.postorder.len()
+            self.node_count
         }
 
         fn nodes(&self) -> impl Iterator<Item = Self::Node> {
-            self.postorder.iter().copied()
+            self.postorder.iter()
         }
     }
 
@@ -328,13 +374,13 @@ pub mod tests {
 
     impl EntryNode for TestGraph {
         fn entry(&self) -> usize {
-            *self.postorder.last().unwrap()
+            self.postorder.node_at(self.postorder.iter().len() - 1)
         }
     }
 
     impl ExitNode for TestGraph {
         fn exit(&self) -> usize {
-            *self.postorder.first().unwrap()
+            self.postorder.node_at(0)
         }
     }
 
@@ -343,18 +389,6 @@ pub mod tests {
             self.edges.iter().filter_map(move |&(u, v)| (u == node).then_some(v))
         }
     }
-
-    impl Postorder for TestGraph {
-        fn at_postorder(&self, index: usize) -> usize {
-            self.postorder[index]
-        }
-
-        fn postorder(&self, node: usize) -> usize {
-            self.postorder.iter().position(|&n| n == node).unwrap()
-        }
-    }
-
-
 
     #[test]
     fn test_cache_predecessors() {
@@ -383,7 +417,7 @@ pub mod tests {
     fn test_idom_single_node() {
         // 0
         let g = TestGraph::new(0, &[]);
-        let result = idom(&g);
+        let result = idom(&g, &g.postorder);
         assert_eq!(result[0], 0);
     }
 
@@ -394,7 +428,7 @@ pub mod tests {
             (0, 1),
             (1, 2),
         ]);
-        let result = idom(&g);
+        let result = idom(&g, &g.postorder);
         assert_eq!(result[0], 0);
         assert_eq!(result[1], 0);
         assert_eq!(result[2], 1);
@@ -413,7 +447,7 @@ pub mod tests {
             (1, 3),
             (2, 3),
         ]);
-        let result = idom(&g);
+        let result = idom(&g, &g.postorder);
         assert_eq!(result[0], 0);
         assert_eq!(result[1], 0);
         assert_eq!(result[2], 0);
@@ -430,7 +464,7 @@ pub mod tests {
             (1, 2),
             (2, 1),
         ]);
-        let result = idom(&g);
+        let result = idom(&g, &g.postorder);
         assert_eq!(result[0], 0);
         assert_eq!(result[1], 0);
         assert_eq!(result[2], 1);
@@ -449,7 +483,7 @@ pub mod tests {
             (3, 2),
             (3, 1),
         ]);
-        let result = idom(&g);
+        let result = idom(&g, &g.postorder);
         assert_eq!(result[0], 0);
         assert_eq!(result[1], 0);
         assert_eq!(result[2], 1);
@@ -467,7 +501,7 @@ pub mod tests {
             (1, 2),
             (2, 1),
         ]);
-        let result = idom(&g);
+        let result = idom(&g, &g.postorder);
         assert_eq!(result[0], 0);
         assert_eq!(result[1], 0);
         assert_eq!(result[2], 0);

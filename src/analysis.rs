@@ -1,6 +1,6 @@
 use std::{collections::HashMap, hash::Hash};
 
-use crate::{graph::{EntryNode, ExitNode, Graph, Idx, Postorder, Predecessors, Successors, Transpose, idom, postorder, transpose, cache_predecessors}};
+use crate::graph::{ArrayNodeOrdering, EntryNode, ExitNode, Graph, Idx, NodeOrdering, Predecessors, Successors, Transpose, cache_predecessors, idom, postorder, transpose};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DefUse {
@@ -17,8 +17,8 @@ pub trait Procedure {
     fn instructions(&self, b: Self::BlockId) -> impl DoubleEndedIterator<Item = (Self::InstrIdx, Self::VarId, DefUse)>;
 }
 
-pub trait Cfg: Graph + EntryNode + ExitNode + Successors + Postorder {}
-impl<T: Graph + EntryNode + ExitNode + Successors + Postorder> Cfg for T {}
+pub trait Cfg: Graph + EntryNode + ExitNode + Successors {}
+impl<T: Graph + EntryNode + ExitNode + Successors> Cfg for T {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct VarLiveness<Idx> {
@@ -59,17 +59,17 @@ impl<P: Procedure> BlockLiveness<P> {
 }
 
 /// Returns liveness info for each variable per block.
-pub fn liveness<P: Procedure>(proc: &P) -> Liveness<P> {
+pub fn liveness<P: Procedure>(proc: &P, postorder: &impl NodeOrdering<P::BlockId>) -> Liveness<P> {
     let cfg = proc.cfg();
     let n = cfg.node_count();
 
     let mut liveness: Box<[BlockLiveness<P>]> = vec![BlockLiveness { map: HashMap::new(), in_size: 0 }; n].into_boxed_slice();
 
-    for (bpo, block) in cfg.postorder_iter().enumerate() {
+    for (bpo, block) in postorder.iter().enumerate() {
         let mut live: BlockLiveness<P> = BlockLiveness { map: HashMap::new(), in_size: 0 };
 
         for a in cfg.successors(block) {
-            let apo = cfg.postorder(a);
+            let apo = postorder.position(a);
             assert!(apo < bpo, "cycle detected");
             for (&x, info) in &liveness[a.index()].map {
                 if info.live_in {
@@ -110,8 +110,7 @@ pub fn liveness<P: Procedure>(proc: &P) -> Liveness<P> {
 
 struct ReverseCfg<G: Graph> {
     inner: Transpose<G>,
-    postorder: Box<[G::Node]>,
-    postorder_index: Box<[usize]>,
+    postorder: ArrayNodeOrdering<G::Node>,
 }
 
 impl<G: Graph> Graph for ReverseCfg<G> {
@@ -138,31 +137,10 @@ impl<G: Successors> Predecessors for ReverseCfg<G> {
     }
 }
 
-impl<G: Graph> Postorder for ReverseCfg<G> {
-    fn postorder(&self, node: Self::Node) -> usize {
-        self.postorder_index[node.index()]
-    }
-
-    fn at_postorder(&self, index: usize) -> Self::Node {
-        self.postorder[index]
-    }
-}
-
-pub fn ipdom<G: ExitNode + Successors>(cfg: G) -> Box<[G::Node]> {
-    let rev_postorder = postorder(&transpose(cache_predecessors(&cfg)));
-
-    let mut rev_postorder_index = vec![0; cfg.node_count()].into_boxed_slice();
-    for (i, &v) in rev_postorder.iter().enumerate() {
-        rev_postorder_index[v.index()] = i;
-    }
-
-    let rev_cfg = ReverseCfg {
-        inner: transpose(cfg),
-        postorder: rev_postorder,
-        postorder_index: rev_postorder_index,
-    };
-
-    idom(&rev_cfg)
+pub fn ipdom<G: ExitNode + Successors>(cfg: &G) -> Box<[G::Node]> {
+    let rev_cfg = transpose(cache_predecessors(cfg));
+    let rev_postorder = postorder(&rev_cfg);
+    idom(&transpose(cfg), &rev_postorder)
 }
 
 #[cfg(test)]
@@ -215,7 +193,7 @@ mod tests {
         let proc = TestProcedure::new(0, &[], &[
             (0, instructions! { def ["x"]; use ["x"] }),
         ]);
-        let result = liveness(&proc);
+        let result = liveness(&proc, &proc.cfg.postorder);
         let a = &result[0];
         assert!(!a.live_in("x"));
         assert_eq!(a.last_use("x"), Some(1));
@@ -228,7 +206,7 @@ mod tests {
             (0, instructions! { def ["x"]; def ["y"]; use ["x"] }),
             (1, instructions! { use ["y"] }),
         ]);
-        let result = liveness(&proc);
+        let result = liveness(&proc, &proc.cfg.postorder);
         let a = &result[0];
         assert!(!a.live_in("x"));
         assert_eq!(a.last_use("x"), Some(2));
@@ -253,7 +231,7 @@ mod tests {
             (0, instructions! { def ["x"] }),
             (3, instructions! { use ["x"] }),
         ]);
-        let result = liveness(&proc);
+        let result = liveness(&proc, &proc.cfg.postorder);
         assert!(!result[0].live_in("x"));
         assert!(result[0].live_out("x"));
         assert!(result[1].live_in("x"));
@@ -271,7 +249,7 @@ mod tests {
             (1, instructions! { def ["x"] }),
             (2, instructions! { use ["x"] }),
         ]);
-        let result = liveness(&proc);
+        let result = liveness(&proc, &proc.cfg.postorder);
         assert_eq!(result[0].live_in_size(), 0);
         assert!(!result[1].live_in("x"));
         assert!(result[1].live_out("x"));
@@ -285,7 +263,7 @@ mod tests {
         let proc = TestProcedure::new(0, &[], &[
             (0, instructions! { def ["x"] ; use ["x"] }),
         ]);
-        let result = liveness(&proc);
+        let result = liveness(&proc, &proc.cfg.postorder);
         assert!(!result[0].live_in("x"));
         assert_eq!(result[0].last_use("x"), Some(1));
     }
@@ -297,7 +275,7 @@ mod tests {
             (0, instructions! { def ["x"] }),
             (1, instructions! { use ["x"] }),
         ]);
-        let result = liveness(&proc);
+        let result = liveness(&proc, &proc.cfg.postorder);
         assert!(!result[0].live_in("x"));
         assert!(result[0].live_out("x"));
         assert!(result[1].live_in("x"));
@@ -311,7 +289,7 @@ mod tests {
         let proc = TestProcedure::new(0, &[], &[
             (0, instructions! { def ["x"]; use ["x"]; use ["x"] }),
         ]);
-        let result = liveness(&proc);
+        let result = liveness(&proc, &proc.cfg.postorder);
         assert!(!result[0].live_in("x"));
         assert_eq!(result[0].last_use("x"), Some(2));
     }
