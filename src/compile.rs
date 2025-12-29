@@ -6,9 +6,10 @@ use std::ops::Range;
 use std::slice;
 
 use crate::utils::exact_size_chain;
+use crate::utils::exact_size_iter::iter_some;
 use crate::{Id, IdGen, asm, core, opcodes};
 use crate::analysis::{self, Cfg, DefUse, Procedure, ipdom, liveness};
-use crate::graph::{EntryNode, ExitNode, Graph, Idx, IdxNodeOrdering, NodeOrdering, Successors};
+use crate::graph::{EntryNode, ExitNode, Graph, Idx, NodeOrdering, Successors};
 
 fn size_of(expr: &core::Expr) -> usize {
     use core::*;
@@ -117,7 +118,7 @@ pub fn compile(block: core::Block, ids: &mut IdGen) -> Vec<asm::Instr> {
         compile_cont(block.data.cont, stack, live_out, ipdom_liveness, &mut code);
 
         let (_, stack) = stack_entry.remove_entry();
-        let succs = proc.successors(block_id);
+        let succs = proc.successor_blocks(block_id);
         let stack = repeat_n(stack, succs.len());
         for (succ, stack) in zip(succs, stack) {
             let prev_stack = stacks.insert(succ, stack);
@@ -302,11 +303,11 @@ fn analyze(proc: &IndexedProc) -> Analysis {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct BlockId(NonZero<usize>);
+struct CfgId(NonZero<usize>);
 
-impl Idx for BlockId {
+impl Idx for CfgId {
     fn new(index: usize) -> Self {
-        BlockId(NonZero::new(index + 1).unwrap())
+        CfgId(NonZero::new(index + 1).unwrap())
     }
 
     fn index(self) -> usize {
@@ -317,8 +318,8 @@ impl Idx for BlockId {
 struct IndexedProc {
     blocks: Box<[IndexedBlock]>,
     segments: Box<[Box<[core::BlockPrior]>]>,
-    labels: HashMap<Id, BlockId>,
-    ipdom: Box<[BlockId]>,
+    labeled_blocks: HashMap<Id, usize>,
+    ipdom: Box<[CfgId]>,
 }
 
 #[derive(PartialEq, Eq, Debug)]
@@ -344,17 +345,63 @@ struct IndexedBlockRef<'a> {
 }
 
 impl IndexedProc {
-    fn block(&self, block_id: BlockId) -> IndexedBlockRef<'_> {
-        IndexedBlockRef { proc: self, data: &self.blocks[block_id.0.get() - 2] }
+    fn block(&self, block_id: CfgId) -> IndexedBlockRef<'_> {
+        IndexedBlockRef { proc: self, data: &self.blocks[block_id.index()] }
     }
 
-    fn fallthrough(&self, block_id: BlockId) -> BlockId {
+    fn fallthrough(&self, block_id: CfgId) -> Option<CfgId> {
         let po = self.postorder();
-        po.node_at(po.position(block_id) - 1)
+        po.position(block_id).checked_sub(1).map(|i| po.node_at(i))
     }
 
-    fn postorder(&self) -> IdxNodeOrdering<BlockId> {
-        IdxNodeOrdering::new(self.blocks.len() + 1)
+    fn successor_blocks(&self, block_id: CfgId) -> impl ExactSizeIterator<Item = CfgId> {
+        let (target, fallthrough) = match &self.block(block_id).data.cont {
+            Cont::Stop(_) => (None, None),
+            Cont::Jump(target, _) => (Some(CfgId::new(self.labeled_blocks[target])), None),
+            Cont::JumpIf { then, .. } => (Some(CfgId::new(self.labeled_blocks[then])), Some(self.fallthrough(block_id).unwrap())),
+        };
+        exact_size_chain(target, fallthrough)
+    }
+
+    fn is_exit_block(&self, block_id: CfgId) -> bool {
+        block_id != self.exit() && matches!(self.block(block_id).data.cont, Cont::Stop(_))
+    }
+
+    fn postorder(&self) -> IndexedProcPostorder {
+        IndexedProcPostorder { block_count: self.blocks.len() }
+    }
+}
+
+pub struct IndexedProcPostorder {
+    block_count: usize,
+}
+
+impl NodeOrdering<CfgId> for IndexedProcPostorder {
+    fn position(&self, node: CfgId) -> usize {
+        let index = node.index();
+        assert!(index <= self.block_count);
+        if index == self.block_count {
+            0
+        } else {
+            index + 1
+        }
+    }
+
+    fn node_at(&self, position: usize) -> CfgId {
+        assert!(position <= self.block_count);
+        if position == 0 {
+            CfgId::new(self.block_count)
+        } else {
+            CfgId::new(position - 1)
+        }
+    }
+
+    #[allow(refining_impl_trait)]
+    fn iter(&self) -> impl DoubleEndedIterator<Item = CfgId> + ExactSizeIterator + use<> {
+        exact_size_chain(
+            [CfgId::new(self.block_count)],
+            (0..self.block_count).map(CfgId::new),
+        )
     }
 }
 
@@ -414,11 +461,11 @@ fn index(block: core::Block, ids: &mut IdGen) -> IndexedProc {
         cont_label: Option<Id>,
     }
 
-    let mut labeled_blocks = 0;
+    let mut label_count = 0;
 
     macro_rules! generate_label {
         () => {{
-            labeled_blocks += 1;
+            label_count += 1;
             ids.generate()
         }}
     }
@@ -526,13 +573,13 @@ fn index(block: core::Block, ids: &mut IdGen) -> IndexedProc {
         }
     }
 
-    let mut labels = HashMap::<Id, BlockId>::with_capacity(labeled_blocks);
+    let mut labeled_blocks = HashMap::with_capacity(label_count);
 
     // Blocks are now in postorder
     let blocks: Vec<_> = Vec::from(queue).into_iter().enumerate().map(|(i, item)| {
         let QueueItem::Finished(b) = item else { unreachable!() };
         if let Some(label) = b.label {
-            labels.insert(label, BlockId(NonZero::new(i + 2).unwrap()));
+            labeled_blocks.insert(label, i);
         }
         b
     }).collect();
@@ -540,7 +587,7 @@ fn index(block: core::Block, ids: &mut IdGen) -> IndexedProc {
     let mut proc = IndexedProc {
         segments: segments.into_boxed_slice(),
         blocks: blocks.into_boxed_slice(),
-        labels,
+        labeled_blocks,
         ipdom: Box::default(),
     };
 
@@ -549,42 +596,37 @@ fn index(block: core::Block, ids: &mut IdGen) -> IndexedProc {
 }
 
 impl Graph for IndexedProc {
-    type Node = BlockId;
+    type Node = CfgId;
 
     fn node_count(&self) -> usize {
         self.blocks.len() + 1
     }
 
     fn nodes(&self) -> impl Iterator<Item = Self::Node> {
-        self.postorder().iter()
+        let postorder = self.postorder();
+        postorder.iter()
     }
 }
 
 impl EntryNode for IndexedProc {
-    fn entry(&self) -> BlockId {
-        BlockId(NonZero::new(self.blocks.len() + 1).unwrap())
+    fn entry(&self) -> CfgId {
+        CfgId::new(self.blocks.len() - 1)
     }
 }
 
 impl ExitNode for IndexedProc {
-    fn exit(&self) -> BlockId {
-        BlockId(NonZero::new(1).unwrap())
+    fn exit(&self) -> CfgId {
+        CfgId::new(self.blocks.len())
     }
 }
 
 impl Successors for IndexedProc {
     #[allow(refining_impl_trait)]
     fn successors(&self, node: Self::Node) -> impl ExactSizeIterator<Item = Self::Node> {
-        let (target, fallthrough) = if node == self.exit() {
-            (None, None)
-        } else {
-            match &self.block(node).data.cont {
-                Cont::Stop(_) => (Some(self.exit()), None),
-                Cont::Jump(target, _) => (Some(self.labels[target]), None),
-                Cont::JumpIf { then, .. } => (Some(self.labels[then]), Some(self.fallthrough(node))),
-            }
-        };
-        exact_size_chain(target, fallthrough)
+        exact_size_chain(
+            iter_some((node != self.exit()).then(|| self.successor_blocks(node))),
+            self.is_exit_block(node).then_some(self.exit()),
+        )
     }
 }
 
@@ -596,7 +638,7 @@ enum InstrIdx {
 }
 
 impl Procedure for IndexedProc {
-    type BlockId = BlockId;
+    type BlockId = CfgId;
     type VarId = Id;
     type InstrIdx = InstrIdx;
 

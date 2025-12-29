@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, mem::replace, num::NonZero};
+use std::{mem::replace, num::NonZero};
 
 use crate::utils::{BitSet, ShiftStack};
 
@@ -44,35 +44,6 @@ pub trait NodeOrdering<N> {
     fn position(&self, node: N) -> usize;
     fn node_at(&self, position: usize) -> N;
     fn iter(&self) -> impl DoubleEndedIterator<Item = N> + ExactSizeIterator;
-}
-
-pub struct IdxNodeOrdering<N> {
-    len: usize,
-    _phantom: PhantomData<fn() -> N>,
-}
-
-impl<N: Idx> IdxNodeOrdering<N> {
-    pub fn new(len: usize) -> Self {
-        Self { len, _phantom: PhantomData }
-    }
-}
-
-impl<N: Idx> NodeOrdering<N> for IdxNodeOrdering<N> {
-    fn position(&self, node: N) -> usize {
-        let position = node.index();
-        assert!(position < self.len);
-        position
-    }
-
-    fn node_at(&self, position: usize) -> N {
-        assert!(position < self.len);
-        N::new(position)
-    }
-
-    #[allow(refining_impl_trait)]
-    fn iter(&self) -> impl DoubleEndedIterator<Item = N> + ExactSizeIterator + use<N> {
-        (0..self.len).map(N::new)
-    }
 }
 
 pub struct ArrayNodeOrdering<N: Idx> {
