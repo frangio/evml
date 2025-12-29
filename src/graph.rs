@@ -226,8 +226,6 @@ impl<G: Predecessors> Successors for Transpose<G> {
     }
 }
 
-
-
 pub fn cache_predecessors<G: Successors>(g: G) -> CachedPredecessors<G> {
     let mut pred_start = vec![0; g.node_count()].into_boxed_slice();
 
