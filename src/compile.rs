@@ -96,7 +96,7 @@ pub fn compile(block: core::Block, ids: &mut IdGen) -> Vec<asm::Instr> {
         let stack = stack_entry.get_mut();
         let liveness = &analysis.liveness[block_id.index()];
         for (i, prior) in block.priors().iter().enumerate() {
-            let is_last_use = |x| liveness.last_use(x) == Some(InstrIdx::Prior(i));
+            let is_last_use = |x| liveness.last_use(x) == InstrIdx::Prior(i);
             compile_prior(prior, stack, is_last_use, &mut code);
         }
 
@@ -166,7 +166,7 @@ fn compile_cont(
     for d in 0..stash_start {
         let d = d - popped;
         let x = stack.read(d);
-        if liveness.last_use_cmp(x, InstrIdx::Cont).is_lt() {
+        if liveness.last_use(x) < InstrIdx::Cont {
             if d > 0 {
                 code.push(Instr::Swap(d));
                 stack.swap(d);
@@ -209,7 +209,7 @@ fn compile_cont(
         }
 
         Cont::JumpIf { cond, then } => {
-            let should_swap = |e: &StackEntry| liveness.last_use(e.var()) == Some(InstrIdx::Cont);
+            let should_swap = |e: &StackEntry| liveness.last_use(e.var()) == InstrIdx::Cont;
             compile_val_onto(&Val::Var(cond), stack, should_swap, code);
             code.push(Instr::PushLabel(then));
             code.push(Instr::JumpIf);
@@ -293,11 +293,10 @@ fn compile_val_onto(
     }
 }
 
-type Liveness = analysis::Liveness<IndexedProc>;
 type BlockLiveness = analysis::BlockLiveness<IndexedProc>;
 
 struct Analysis {
-    liveness: Liveness,
+    liveness: Box<[BlockLiveness]>,
 }
 
 fn analyze(proc: &IndexedProc) -> Analysis {
