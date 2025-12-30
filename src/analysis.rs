@@ -1,6 +1,6 @@
 use std::{cmp::Ordering, collections::HashMap, hash::Hash};
 
-use crate::graph::{ArrayNodeOrdering, EntryNode, ExitNode, Graph, Idx, NodeOrdering, Predecessors, Successors, Transpose, cache_predecessors, idom, postorder, transpose};
+use crate::graph::{EntryNode, ExitNode, Graph, Idx, NodeOrdering, Successors, cache_predecessors, idom, postorder, transpose};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DefUse {
@@ -112,35 +112,6 @@ pub fn liveness<P: Procedure>(proc: &P, postorder: &impl NodeOrdering<P::BlockId
     }
 
     liveness
-}
-
-struct ReverseCfg<G: Graph> {
-    inner: Transpose<G>,
-    postorder: ArrayNodeOrdering<G::Node>,
-}
-
-impl<G: Graph> Graph for ReverseCfg<G> {
-    type Node = G::Node;
-
-    fn node_count(&self) -> usize {
-        self.inner.node_count()
-    }
-
-    fn nodes(&self) -> impl Iterator<Item = Self::Node> {
-        self.inner.nodes()
-    }
-}
-
-impl<G: ExitNode> EntryNode for ReverseCfg<G> {
-    fn entry(&self) -> Self::Node {
-        self.inner.entry()
-    }
-}
-
-impl<G: Successors> Predecessors for ReverseCfg<G> {
-    fn predecessors(&self, node: Self::Node) -> impl Iterator<Item = Self::Node> {
-        self.inner.predecessors(node)
-    }
 }
 
 pub fn ipdom<G: ExitNode + Successors>(cfg: &G) -> Box<[G::Node]> {

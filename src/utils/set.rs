@@ -10,11 +10,6 @@ impl BitSet {
         BitSet { store }
     }
 
-    pub fn contains(&self, x: usize) -> bool {
-        let (word, mask) = word_mask(x);
-        self.store[word] & mask != 0
-    }
-
     pub fn insert(&mut self, x: usize) -> bool {
         let (word, mask) = word_mask(x);
         let inserted = self.store[word] & mask == 0;

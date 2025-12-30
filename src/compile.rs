@@ -2,7 +2,6 @@ use std::collections::{HashMap, VecDeque, hash_map};
 use std::iter::{chain, repeat_n, zip};
 use std::mem::{take};
 use std::num::NonZero;
-use std::ops::Range;
 use std::slice;
 
 use crate::utils::exact_size_chain;
@@ -61,15 +60,6 @@ impl Stack {
             .rposition(|y| y.as_ref().is_some_and(|&y| y == x))
             .expect("unknown variable");
         StackEntry { stack: self, index }
-    }
-
-    fn find_depth(&self, depths: Range<usize>, pred: impl Fn(Option<Id>) -> bool) -> Option<usize> {
-        let top = self.0.len() - 1;
-        let [start_index, end_index] = [depths.end, depths.start].map(|d| top - d);
-        self.0[start_index..end_index].iter()
-            .copied()
-            .rposition(pred)
-            .map(|i| top - (start_index + i))
     }
 }
 

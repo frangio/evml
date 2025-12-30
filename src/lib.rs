@@ -1,8 +1,5 @@
-#![allow(dead_code)]
-
 mod runner;
 mod opcodes;
-mod scc;
 mod graph;
 mod analysis;
 mod compile;
@@ -19,28 +16,12 @@ use revm::{bytecode::opcode, primitives::U256};
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Id(NonZeroUsize);
 
-#[repr(usize)]
-enum IdReserve {
-    Root = NonZeroUsize::MIN.get(),
-    Unallocated,
-}
-
-impl IdReserve {
-    const fn into_non_zero(self) -> NonZeroUsize {
-        NonZeroUsize::new(self as usize).unwrap()
-    }
-}
-
-impl Id {
-    const ROOT: Self = Id(IdReserve::Root.into_non_zero());
-}
-
 #[cfg_attr(test, derive(Clone))]
 pub struct IdGen(NonZeroUsize);
 
 impl IdGen {
     pub fn new() -> IdGen {
-        IdGen(IdReserve::Unallocated.into_non_zero())
+        IdGen(NonZeroUsize::MIN)
     }
 
     fn generate(&mut self) -> Id {
