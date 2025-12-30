@@ -323,9 +323,9 @@ fn lower_val(val: ast::Val<Id>) -> core::Val {
     }
 }
 
-pub fn resolve(block: &ast::Block<&str>, mut ids: &mut IdGen) -> Result<ast::Block<Id>> {
+pub fn resolve(block: &ast::Block<&str>, ids: &mut IdGen) -> Result<ast::Block<Id>> {
     let env = HashMap::new();
-    resolve_block(block, &mut ids, env)
+    resolve_block(block, ids, env)
 }
 
 fn resolve_block<'a>(
@@ -414,7 +414,7 @@ pub fn parse(source: &str) -> Result<ast::Block<&str>> {
 
         let block = recursive(|block| {
             let expr = recursive(|expr| {
-                let expr_val = val.clone().map(Expr::Val);
+                let expr_val = val.map(Expr::Val);
 
                 let expr_op = just('@')
                     .ignore_then(text::ident())
