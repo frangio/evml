@@ -51,6 +51,7 @@ pub mod ast {
     }
 
     pub enum Expr<T> {
+        Unit,
         Val(Val<T>),
         Op(u8, Vec<Val<T>>),
         IfThenElse(Box<(Expr<T>, [Block<T>; 2])>),
@@ -78,6 +79,7 @@ pub mod core {
 
     #[derive(PartialEq, Eq, Debug)]
     pub enum Expr {
+        Unit,
         Val(Val),
         Op(u8, Vec<Val>),
         IfThenElse(Val, Box<[Block; 2]>),
@@ -241,6 +243,8 @@ fn type_check_expr(expr: &ast::Expr<Id>, env: &HashMap<Id, Type>) -> Result<usiz
     };
 
     match expr {
+        Expr::Unit => Ok(0),
+
         Expr::Val(v) => type_check_val(v),
 
         Expr::Op(op, args) => {
@@ -291,6 +295,7 @@ fn lower_expr(
     ids: &mut IdGen,
 ) -> core::Expr {
     match expr {
+        ast::Expr::Unit => core::Expr::Unit,
         ast::Expr::Val(val) => core::Expr::Val(lower_val(val)),
         ast::Expr::Op(op, vals) => {
             core::Expr::Op(op, vals.into_iter().map(lower_val).collect())
@@ -364,6 +369,7 @@ fn resolve_expr(
 ) -> Result<ast::Expr<Id>> {
     use ast::*;
     Ok(match expr {
+        Expr::Unit => Expr::Unit,
         Expr::Val(val) => Expr::Val(resolve_val(val, env)?),
         Expr::Op(op, vals) => {
             let vals = vals.iter().map(|val| resolve_val(val, env)).collect::<Result<_>>()?;

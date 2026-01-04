@@ -13,6 +13,7 @@ use crate::graph::{EntryNode, ExitNode, Graph, Idx, NodeOrdering, Successors};
 fn size_of(expr: &core::Expr) -> usize {
     use core::*;
     match expr {
+        Expr::Unit => 0,
         Expr::Val(_) => 1,
         Expr::Op(op, _) => opcodes::info(*op).unwrap().outputs,
         Expr::IfThenElse(_, then_else) => size_of(&then_else[0].tail),
@@ -255,7 +256,7 @@ fn compile_expr_onto(
             stack.popn(args.len());
         }
 
-        Expr::IfThenElse(..) => panic!(),
+        Expr::Unit | Expr::IfThenElse(..) => panic!(),
     }
 }
 
@@ -422,6 +423,10 @@ fn normalize_tail(block: core::Block, ids: &mut IdGen) -> (Vec<core::BlockPrior>
     use core::*;
     let Block { mut priors, tail } = block;
     let tail = match tail {
+        Expr::Unit => {
+            TailExpr::Return(None)
+        }
+
         Expr::Val(Val::Var(x)) => {
             TailExpr::Return(Some(x))
         }
@@ -667,6 +672,7 @@ impl Procedure for IndexedProc {
         let prior_def_uses = priors.iter().enumerate().flat_map(|(i, prior)| {
             let BlockPrior::Let(def, expr) = prior;
             let vals: &[Val] = match expr {
+                Expr::Unit => &[],
                 Expr::Val(val) => slice::from_ref(val),
                 Expr::Op(_, args) => args,
                 Expr::IfThenElse(val, _) => slice::from_ref(val),
