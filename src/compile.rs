@@ -154,12 +154,7 @@ fn compile_cont(
     use core::*;
     use asm::*;
 
-    let res_size = match cont {
-        Cont::Stop(res) | Cont::Jump(_, res) => res.map_or(0, |_| 1),
-        Cont::JumpIf { .. } => 0,
-    };
-
-    let stash_start = stack.len() - 1 - ipdom_liveness.live_in_size() + res_size;
+    let stash_start = stack.len() - ipdom_liveness.live_in_size();
     let mut next_avail = stash_start;
     let mut popped = 0;
 
@@ -190,18 +185,19 @@ fn compile_cont(
         }
     }
 
-    if let Cont::Jump(target, Some(res)) = cont {
-        assert!(res == stack.read(0));
-        stack.popn(1);
-        stack.push(target_input(target));
-    }
+    let should_swap = |e: &StackEntry| liveness.last_use(e.var()) == InstrIdx::Cont;
 
     match cont {
         Cont::Stop(_) => {
             code.push(Instr::Stop);
         }
 
-        Cont::Jump(target, _) => {
+        Cont::Jump(target, res) => {
+            if let Some(res) = res {
+                compile_val_onto(&Val::Var(res), stack, should_swap, code);
+                stack.push(target_input(target));
+            }
+
             if Some(target) != fallthrough_target {
                 code.push(Instr::PushLabel(target));
                 code.push(Instr::Jump);
@@ -209,7 +205,6 @@ fn compile_cont(
         }
 
         Cont::JumpIf { cond, then } => {
-            let should_swap = |e: &StackEntry| liveness.last_use(e.var()) == InstrIdx::Cont;
             compile_val_onto(&Val::Var(cond), stack, should_swap, code);
             code.push(Instr::PushLabel(then));
             code.push(Instr::JumpIf);
