@@ -439,9 +439,13 @@ pub fn parse(source: &str) -> Result<ast::Block<&str>> {
                     .padded()
                     .ignore_then(expr.clone())
                     .then(block.clone().delimited_by(just('{'), just('}')).padded())
-                    .then_ignore(text::keyword("else").padded())
-                    .then(block.clone().delimited_by(just('{'), just('}')).padded())
+                    .then(
+                        text::keyword("else").padded()
+                            .ignore_then(block.clone().delimited_by(just('{'), just('}')).padded())
+                            .or_not()
+                    )
                     .map(|((cond, then_block), else_block)| {
+                        let else_block = else_block.unwrap_or(Block { priors: vec![], tail: Expr::Unit });
                         Expr::IfThenElse(Box::new((cond, [then_block, else_block])))
                     });
 
@@ -471,9 +475,9 @@ pub fn parse(source: &str) -> Result<ast::Block<&str>> {
                 .padded()
                 .repeated()
                 .collect()
-                .then(expr)
+                .then(expr.or_not())
                 .padded()
-                .map(|(priors, tail)| Block { priors, tail })
+                .map(|(priors, tail)| Block { priors, tail: tail.unwrap_or(Expr::Unit) })
         });
 
         block.then_ignore(end())
