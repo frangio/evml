@@ -1,7 +1,11 @@
-let a = 9;
-let b = 14;
-if @gt(a, b) {
-  @sub(a, b)
-} else {
-  @sub(b, a)
+fn main() -> u256 {
+  distance(3, 5)
+}
+
+fn distance(a, b) -> u256 {
+  if @gt(a, b) {
+    @sub(a, b)
+  } else {
+    @sub(b, a)
+  }
 }

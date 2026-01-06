@@ -6,19 +6,9 @@ use std::slice;
 
 use crate::utils::exact_size_chain;
 use crate::utils::exact_size_iter::iter_some;
-use crate::{Id, IdGen, asm, core, opcodes};
+use crate::{Id, IdGen, asm, core};
 use crate::analysis::{self, Cfg, DefUse, Procedure, ipdom, liveness};
 use crate::graph::{EntryNode, ExitNode, Graph, Idx, NodeOrdering, Successors};
-
-fn size_of(expr: &core::Expr) -> usize {
-    use core::*;
-    match expr {
-        Expr::Unit => 0,
-        Expr::Val(_) => 1,
-        Expr::Op(op, _) => opcodes::info(*op).unwrap().outputs,
-        Expr::IfThenElse(_, then_else) => size_of(&then_else[0].tail),
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Stack(Vec<Option<Id>>);
@@ -28,10 +18,6 @@ struct StackEntry<'a> {
 }
 
 impl Stack {
-    fn new() -> Self {
-        Self(Vec::new())
-    }
-
     fn len(&self) -> usize {
         self.0.len()
     }
@@ -64,6 +50,18 @@ impl Stack {
     }
 }
 
+impl Default for Stack {
+    fn default() -> Self {
+        Self(Vec::new())
+    }
+}
+
+impl FromIterator<Id> for Stack {
+    fn from_iter<T: IntoIterator<Item = Id>>(iter: T) -> Self {
+        Stack(iter.into_iter().map(Some).collect())
+    }
+}
+
 impl StackEntry<'_> {
     fn var(&self) -> Id {
         self.stack.0[self.index].expect("stack item is temporary")
@@ -79,14 +77,25 @@ impl StackEntry<'_> {
     }
 }
 
-pub fn compile(block: core::Block, ids: &mut IdGen) -> Vec<asm::Instr> {
-    let proc = index(block, ids);
+pub fn compile(program: core::Program, ids: &mut IdGen) -> Vec<asm::Instr> {
+    let mut code = vec![];
+
+    compile_proc(program.main, &[], Some(program.rets), ids, &mut code);
+
+    for (label, proc) in program.procs {
+        code.push(asm::Instr::JumpDest(label));
+        compile_proc(proc.body, &proc.args, None, ids, &mut code);
+    }
+
+    code
+}
+
+fn compile_proc(body: core::Block, args: &[Id], stop: Option<usize>, ids: &mut IdGen, code: &mut Vec<asm::Instr>) {
+    let proc = index(body, stop, ids);
     let analysis = analyze(&proc);
 
-    let mut stacks = HashMap::new();
-    stacks.insert(proc.entry(), Stack::new());
-
-    let mut code = vec![];
+    let mut stacks = HashMap::<_, Stack>::new();
+    stacks.insert(proc.entry(), args.iter().copied().collect());
 
     for block_id in proc.postorder().iter().skip(1).rev() {
         let block = proc.block(block_id);
@@ -95,25 +104,25 @@ pub fn compile(block: core::Block, ids: &mut IdGen) -> Vec<asm::Instr> {
         }
         let hash_map::Entry::Occupied(mut stack_entry) = stacks.entry(block_id) else { panic!() };
         let stack = stack_entry.get_mut();
+        if let Some(input) = block.data.input {
+            stack.push(Some(input));
+        }
         let liveness = &analysis.liveness[block_id.index()];
         for (i, prior) in block.priors().iter().enumerate() {
             let is_last_use = |x| liveness.last_use(x) == InstrIdx::Prior(i);
-            compile_prior(prior, stack, is_last_use, &mut code);
+            compile_prior(prior, stack, is_last_use, ids, code);
         }
 
         let ipdom = proc.ipdom[block_id.index()];
         let ipdom_liveness = &analysis.liveness[ipdom.index()];
 
-        let target_input = |label| proc.labeled_block(label).data.input;
-
         compile_cont(
-            block.data.cont,
+            &block.data.cont,
             stack,
             liveness,
             ipdom_liveness,
-            target_input,
             proc.fallthrough(block_id).and_then(|i| proc.blocks[i.index()].label),
-            &mut code,
+            code,
         );
 
         let (_, stack) = stack_entry.remove_entry();
@@ -126,29 +135,27 @@ pub fn compile(block: core::Block, ids: &mut IdGen) -> Vec<asm::Instr> {
             }
         }
     }
-
-    code
 }
 
 fn compile_prior(
     prior: &core::BlockPrior,
     stack: &mut Stack,
     is_last_use: impl Fn(Id) -> bool,
+    ids: &mut IdGen,
     code: &mut Vec<asm::Instr>,
 ) {
     let core::BlockPrior::Let(x, e) = prior;
-    compile_expr_onto(e, stack, is_last_use, code);
+    compile_expr_onto(e, stack, is_last_use, ids, code);
     if let &Some(x) = x {
         stack.push(Some(x));
     }
 }
 
 fn compile_cont(
-    cont: Cont,
+    cont: &Cont,
     stack: &mut Stack,
     liveness: &BlockLiveness,
     ipdom_liveness: &BlockLiveness,
-    target_input: impl Fn(Id) -> Option<Id>,
     fallthrough_target: Option<Id>,
     code: &mut Vec<asm::Instr>,
 ) {
@@ -186,18 +193,24 @@ fn compile_cont(
         }
     }
 
-    let should_swap = |e: &StackEntry| liveness.last_use(e.var()) == InstrIdx::Cont;
+    let should_swap = |x: Id| liveness.last_use(x) == InstrIdx::Cont;
 
-    match cont {
+    match *cont {
         Cont::Stop(_) => {
             code.push(Instr::Stop);
         }
 
-        Cont::Jump(target, res) => {
-            if let Some(res) = res {
-                compile_val_onto(&Val::Var(res), stack, should_swap, code);
-                stack.push(target_input(target));
+        Cont::Ret(x) => {
+            let offset = x.is_some() as usize;
+            if offset > 0 {
+                code.push(Instr::Swap(offset));
             }
+            code.push(Instr::Jump);
+        }
+
+        Cont::Jump(target, ref args) => {
+            compile_args_onto(args, None, stack, should_swap, code);
+            stack.popn(args.len());
 
             if Some(target) != fallthrough_target {
                 code.push(Instr::PushLabel(target));
@@ -206,7 +219,7 @@ fn compile_cont(
         }
 
         Cont::JumpIf { cond, then } => {
-            compile_val_onto(&Val::Var(cond), stack, should_swap, code);
+            compile_val_onto(&Val::Var(cond), stack, |e: &StackEntry| should_swap(e.var()), code);
             code.push(Instr::PushLabel(then));
             code.push(Instr::JumpIf);
         }
@@ -217,6 +230,7 @@ fn compile_expr_onto(
     expr: &core::Expr,
     stack: &mut Stack,
     is_last_use: impl Fn(Id) -> bool,
+    ids: &mut IdGen,
     code: &mut Vec<asm::Instr>,
 ) {
     use core::*;
@@ -227,36 +241,67 @@ fn compile_expr_onto(
         }
 
         Expr::Op(op, args) => {
-            let should_swap  = |x, i| {
-                is_last_use(x) && !args[..i].contains(&Val::Var(x))
-            };
-
-            let stack_delta = args.iter().enumerate().filter(|&(i, v)| {
-                match v {
-                    Val::Const(_) => true,
-                    Val::Var(x) => !should_swap(*x, i),
-                }
-            }).count();
-
-            let target_stack_len = stack.len() + stack_delta;
-
-            for (i, v) in args.iter().enumerate().rev() {
-                let should_swap = |e: &StackEntry| should_swap(e.var(), i);
-                compile_val_onto(v, stack, should_swap, code);
-                stack.push(None);
-                let rem_delta = target_stack_len - stack.len();
-                let offset = i - rem_delta;
-                if offset > 0 {
-                    code.push(Instr::Swap(offset));
-                    stack.swap(offset);
-                }
-            }
-
+            compile_args_onto(args, None, stack, &is_last_use, code);
             code.push(Instr::Op(*op));
             stack.popn(args.len());
         }
 
+        Expr::Apply(target, args) => {
+            let ret = ids.generate();
+            compile_args_onto(args, Some(ret), stack, &is_last_use, code);
+            code.push(Instr::PushLabel(*target));
+            code.push(Instr::Jump);
+            code.push(Instr::JumpDest(ret));
+            stack.popn(args.len() + 1);
+        }
+
         Expr::Unit | Expr::IfThenElse(..) => panic!(),
+    }
+}
+
+fn compile_args_onto(
+    args: &[core::Val],
+    ret_label: Option<Id>,
+    stack: &mut Stack,
+    is_last_use: impl Fn(Id) -> bool,
+    code: &mut Vec<asm::Instr>,
+) {
+    use core::*;
+    use asm::*;
+
+    let should_swap = |x, i| {
+        is_last_use(x) && !args[..i].contains(&Val::Var(x))
+    };
+
+    let stack_delta = args.iter().enumerate().filter(|&(i, v)| {
+        match v {
+            Val::Const(_) => true,
+            Val::Var(x) => !should_swap(*x, i),
+        }
+    }).count();
+
+    if let Some(ret_label) = ret_label {
+        code.push(Instr::PushLabel(ret_label));
+        stack.push(None);
+        let offset = args.len() - stack_delta;
+        if offset > 0 {
+            code.push(Instr::Swap(offset));
+            stack.swap(offset);
+        }
+    }
+
+    let target_stack_len = stack.len() + stack_delta;
+
+    for (i, v) in args.iter().enumerate().rev() {
+        let should_swap = |e: &StackEntry| should_swap(e.var(), i);
+        compile_val_onto(v, stack, should_swap, code);
+        stack.push(None);
+        let rem_delta = target_stack_len - stack.len();
+        let offset = i - rem_delta;
+        if offset > 0 {
+            code.push(Instr::Swap(offset));
+            stack.swap(offset);
+        }
     }
 }
 
@@ -330,21 +375,17 @@ struct IndexedBlock {
     cont: Cont,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(PartialEq, Eq, Debug)]
 enum Cont {
+    Ret(Option<Id>),
     Stop(Option<Id>),
-    Jump(Id, Option<Id>),
+    Jump(Id, Vec<core::Val>),
     JumpIf { cond: Id, then: Id },
 }
 
 impl IndexedProc {
     fn block(&self, block_id: CfgId) -> IndexedBlockRef<'_> {
         IndexedBlockRef { proc: self, data: &self.blocks[block_id.index()] }
-    }
-
-    fn labeled_block(&self, label: Id) -> IndexedBlockRef<'_> {
-        let block_index = self.labeled_blocks[&label];
-        IndexedBlockRef { proc: self, data: &self.blocks[block_index] }
     }
 
     fn fallthrough(&self, block_id: CfgId) -> Option<CfgId> {
@@ -354,15 +395,22 @@ impl IndexedProc {
 
     fn successor_blocks(&self, block_id: CfgId) -> impl ExactSizeIterator<Item = CfgId> {
         let (target, fallthrough) = match &self.block(block_id).data.cont {
-            Cont::Stop(_) => (None, None),
-            Cont::Jump(target, _) => (Some(CfgId::new(self.labeled_blocks[target])), None),
+            Cont::Stop(_) | Cont::Ret(_) => (None, None),
+            Cont::Jump(target, _) => (self.labeled_blocks.get(target).map(|&i| CfgId::new(i)), None),
             Cont::JumpIf { then, .. } => (Some(CfgId::new(self.labeled_blocks[then])), Some(self.fallthrough(block_id).unwrap())),
         };
         exact_size_chain(target, fallthrough)
     }
 
     fn is_exit_block(&self, block_id: CfgId) -> bool {
-        block_id != self.exit() && matches!(self.block(block_id).data.cont, Cont::Stop(_))
+        if block_id == self.exit() {
+            return false;
+        }
+        match self.block(block_id).data.cont {
+            Cont::Stop(_) | Cont::Ret(_) => true,
+            Cont::Jump(target, _) => !self.labeled_blocks.contains_key(&target),
+            Cont::JumpIf { .. } => false,
+        }
     }
 
     fn postorder(&self) -> IndexedProcPostorder {
@@ -414,43 +462,7 @@ impl NodeOrdering<CfgId> for IndexedProcPostorder {
     }
 }
 
-enum TailExpr {
-    Return(Option<Id>),
-    IfThenElse(Id, Box<[core::Block; 2]>),
-}
-
-fn normalize_tail(block: core::Block, ids: &mut IdGen) -> (Vec<core::BlockPrior>, TailExpr) {
-    use core::*;
-    let Block { mut priors, tail } = block;
-    let tail = match tail {
-        Expr::Unit => {
-            TailExpr::Return(None)
-        }
-
-        Expr::Val(Val::Var(x)) => {
-            TailExpr::Return(Some(x))
-        }
-
-        expr @ Expr::Op(..) if size_of(&expr) == 0 => {
-            priors.push(BlockPrior::Let(None, expr));
-            TailExpr::Return(None)
-        }
-
-        expr @ (Expr::Op(..) | Expr::Val(_)) => {
-            let x = ids.generate();
-            priors.push(BlockPrior::Let(Some(x), expr));
-            TailExpr::Return(Some(x))
-        }
-
-        Expr::IfThenElse(cond, then_else) => {
-            let Val::Var(cond) = cond else { todo!() };
-            TailExpr::IfThenElse(cond, then_else)
-        }
-    };
-    (priors, tail)
-}
-
-fn index(block: core::Block, ids: &mut IdGen) -> IndexedProc {
+fn index(block: core::Block, stop: Option<usize>, ids: &mut IdGen) -> IndexedProc {
     use core::*;
 
     enum QueueItem {
@@ -482,7 +494,18 @@ fn index(block: core::Block, ids: &mut IdGen) -> IndexedProc {
 
     macro_rules! unvisited_block {
         ($block:expr) => {{
-            let (priors, tail) = normalize_tail($block, ids);
+            let Block { mut priors, mut tail } = $block;
+            if let Some(rets) = stop && let TailExpr::Apply(target, args) = tail {
+                assert!(rets <= 1);
+                if rets == 0 {
+                    priors.push(BlockPrior::Let(None, Expr::Apply(target, args)));
+                    tail = TailExpr::Unit;
+                } else {
+                    let res = ids.generate();
+                    priors.push(BlockPrior::Let(Some(res), Expr::Apply(target, args)));
+                    tail = TailExpr::Var(res);
+                }
+            }
             let segment = segments.len();
             segments.push(priors.into_boxed_slice());
             UnvisitedBlock {
@@ -520,8 +543,6 @@ fn index(block: core::Block, ids: &mut IdGen) -> IndexedProc {
                             take(&mut segments[segment][split])
                         else { unreachable!() };
 
-                        let Val::Var(cond) = cond else { todo!() };
-
                         let join = UnvisitedBlock {
                             label: Some(generate_label!()),
                             input: res,
@@ -536,14 +557,34 @@ fn index(block: core::Block, ids: &mut IdGen) -> IndexedProc {
                 };
 
                 match tail {
-                    TailExpr::Return(res) => {
+                    TailExpr::Unit | TailExpr::Var(_) | TailExpr::Apply(_, _) => {
+                        let cont = match tail {
+                            TailExpr::Unit | TailExpr::Var(_) => {
+                                let res = if let TailExpr::Var(x) = tail { Some(x) } else { None };
+                                cont_label.map_or(
+                                    if stop.is_some() {
+                                        Cont::Stop(res)
+                                    } else {
+                                        Cont::Ret(res)
+                                    },
+                                    |cont| Cont::Jump(cont, res.into_iter().map(Val::Var).collect()),
+                                )
+                            }
+
+                            TailExpr::Apply(target, args) => {
+                                assert!(cont_label.is_none());
+                                Cont::Jump(target, args)
+                            }
+
+                            TailExpr::IfThenElse(..) => unreachable!(),
+                        };
                         queue.push_back(QueueItem::Finished(IndexedBlock {
                             label,
                             input,
                             segment,
                             start,
                             end: segments[segment].len(),
-                            cont: cont_label.map_or(Cont::Stop(res), |cont| Cont::Jump(cont, res)),
+                            cont,
                         }))
                     }
 
@@ -656,36 +697,45 @@ impl Procedure for IndexedProc {
     fn instructions(&self, b: Self::BlockId) -> impl DoubleEndedIterator<Item = (Self::InstrIdx, Self::VarId, DefUse)> {
         use core::*;
 
-        let (priors, input_def, cont_use) = if b == self.exit() {
-            ([].as_slice(), None, None)
+        let (priors, input_def, cont_vals, cont_ids): (&[_], _, &[Val], &[Id]) = if b == self.exit() {
+            (&[], None, &[], &[])
         } else {
             let block = self.block(b);
             let priors = block.priors();
             let input_def = block.data.input.map(|id| (InstrIdx::Input, id, DefUse::Def));
-            let cont_use = match &block.data.cont {
-                Cont::Stop(x) | Cont::Jump(_, x) => *x,
-                Cont::JumpIf { cond, .. } => Some(*cond),
-            }.map(|id| (InstrIdx::Cont, id, DefUse::Use));
-            (priors, input_def, cont_use)
+            let (cont_vals, cont_ids): (&[Val], &[Id]) = match &block.data.cont {
+                Cont::Stop(x) | Cont::Ret(x) => (&[], x.as_slice()),
+                Cont::Jump(_, args) => (args.as_slice(), &[]),
+                Cont::JumpIf { cond, .. } => (&[], slice::from_ref(cond)),
+            };
+            (priors, input_def, cont_vals, cont_ids)
         };
 
         let prior_def_uses = priors.iter().enumerate().flat_map(|(i, prior)| {
             let BlockPrior::Let(def, expr) = prior;
-            let vals: &[Val] = match expr {
-                Expr::Unit => &[],
-                Expr::Val(val) => slice::from_ref(val),
-                Expr::Op(_, args) => args,
-                Expr::IfThenElse(val, _) => slice::from_ref(val),
+            let (vals, ids): (&[Val], &[Id]) = match expr {
+                Expr::Unit => (&[], &[]),
+                Expr::Val(val) => (slice::from_ref(val), &[]),
+                Expr::Op(_, args) => (args.as_slice(), &[]),
+                Expr::Apply(_, args) => (args.as_slice(), &[]),
+                Expr::IfThenElse(id, _) => (&[], slice::from_ref(id)),
             };
             let def_iter = def.map(|id| (InstrIdx::Prior(i), id, DefUse::Def));
-            let uses_iter = vals.iter().filter_map(move |val| match val {
+            let uses_iter_vals = vals.iter().filter_map(move |val| match val {
                 Val::Var(id) => Some((InstrIdx::Prior(i), *id, DefUse::Use)),
                 Val::Const(_) => None,
             });
-            chain(def_iter, uses_iter)
+            let uses_iter_ids = ids.iter().map(move |&id| (InstrIdx::Prior(i), id, DefUse::Use));
+            chain(def_iter, uses_iter_vals).chain(uses_iter_ids)
         });
 
-        chain(input_def, prior_def_uses).chain(cont_use)
+        let cont_uses_vals = cont_vals.iter().filter_map(|v| match v {
+            Val::Var(id) => Some((InstrIdx::Cont, *id, DefUse::Use)),
+            Val::Const(_) => None,
+        });
+        let cont_uses_ids = cont_ids.iter().map(|&id| (InstrIdx::Cont, id, DefUse::Use));
+
+        chain(input_def, prior_def_uses).chain(cont_uses_vals).chain(cont_uses_ids)
     }
 }
 
@@ -694,7 +744,11 @@ mod tests {
     use revm::primitives::U256;
 
     use super::*;
-    use crate::{IdGen, generate_ids, asm::Instr::*, core::{Block, BlockPrior::*, Expr::*, Val::*}, graph::Successors};
+    use crate::{IdGen, generate_ids, asm::Instr::*, core::{self, Block, BlockPrior::*, Expr::*, TailExpr, Val::*}, graph::Successors};
+
+    fn program(main: Block, rets: usize) -> core::Program {
+        core::Program { main, rets, procs: vec![] }
+    }
 
     #[test]
     fn test_index_trivial() {
@@ -702,9 +756,9 @@ mod tests {
         generate_ids!(ids => x);
         let block = Block {
             priors: vec![],
-            tail: Val(Var(x)),
+            tail: TailExpr::Var(x),
         };
-        let indexed = index(block, &mut ids);
+        let indexed = index(block, Some(1), &mut ids);
         assert_eq!(indexed.blocks.len(), 1);
 
         let entry_successors: Vec<_> = indexed.successors(indexed.entry()).collect();
@@ -719,21 +773,21 @@ mod tests {
         generate_ids!(ids => x, y, z);
         let block = Block {
             priors: vec![],
-            tail: IfThenElse(
-                Var(x),
+            tail: TailExpr::IfThenElse(
+                x,
                 Box::new([
                     Block {
                         priors: vec![],
-                        tail: Val(Var(y)),
+                        tail: TailExpr::Var(y),
                     },
                     Block {
                         priors: vec![],
-                        tail: Val(Var(z)),
+                        tail: TailExpr::Var(z),
                     },
                 ]),
             ),
         };
-        let indexed = index(block, &mut ids);
+        let indexed = index(block, Some(1), &mut ids);
         assert_eq!(indexed.blocks.len(), 3);
 
         let entry = indexed.entry();
@@ -755,21 +809,22 @@ mod tests {
     fn test_index_if_then_else_prior() {
         let mut ids = IdGen::new();
         generate_ids!(ids => x, y);
+        generate_ids!(ids => t, f);
         let block = Block {
             priors: vec![
                 Let(Some(x), Val(Const(U256::from(1)))),
                 Let(Some(y), IfThenElse(
-                    Var(x),
+                    x,
                     Box::new([
-                        Block { priors: vec![], tail: Val(Const(U256::from(1))) },
-                        Block { priors: vec![], tail: Val(Const(U256::from(0))) },
+                        Block { priors: vec![Let(Some(t), Val(Const(U256::from(1))))], tail: TailExpr::Var(t) },
+                        Block { priors: vec![Let(Some(f), Val(Const(U256::from(0))))], tail: TailExpr::Var(f) },
                     ]),
                 )),
             ],
-            tail: Val(Var(y)),
+            tail: TailExpr::Var(y),
         };
 
-        let indexed = index(block, &mut ids);
+        let indexed = index(block, Some(1), &mut ids);
         assert_eq!(indexed.blocks.len(), 4);
 
         let entry = indexed.entry();
@@ -794,20 +849,20 @@ mod tests {
     #[test]
     fn test_compile_if_then_else_tail() {
         let mut ids = IdGen::new();
-        generate_ids!(ids => x);
+        generate_ids!(ids => x, t, f);
         let block = Block {
             priors: vec![
                 Let(Some(x), Val(Const(U256::from(2)))),
             ],
-            tail: IfThenElse(
-                Var(x),
+            tail: TailExpr::IfThenElse(
+                x,
                 Box::new([
-                    Block { priors: vec![], tail: Val(Const(U256::from(1))) },
-                    Block { priors: vec![], tail: Val(Const(U256::from(0))) },
+                    Block { priors: vec![Let(Some(t), Val(Const(U256::from(1))))], tail: TailExpr::Var(t) },
+                    Block { priors: vec![Let(Some(f), Val(Const(U256::from(0))))], tail: TailExpr::Var(f) },
                 ]),
             ),
         };
-        let code = compile(block, &mut ids.clone());
+        let code = compile(program(block, 1), &mut ids.clone());
         generate_ids!(ids => label);
         assert_eq!(code, vec![
             Push(U256::from(2)),
@@ -824,21 +879,21 @@ mod tests {
     #[test]
     fn test_compile_if_then_else_prior() {
         let mut ids = IdGen::new();
-        generate_ids!(ids => x, y);
+        generate_ids!(ids => x, y, t, f);
         let block = Block {
             priors: vec![
                 Let(Some(x), Val(Const(U256::from(2)))),
                 Let(Some(y), IfThenElse(
-                    Var(x),
+                    x,
                     Box::new([
-                        Block { priors: vec![], tail: Val(Const(U256::from(1))) },
-                        Block { priors: vec![], tail: Val(Const(U256::from(0))) },
+                        Block { priors: vec![Let(Some(t), Val(Const(U256::from(1))))], tail: TailExpr::Var(t) },
+                        Block { priors: vec![Let(Some(f), Val(Const(U256::from(0))))], tail: TailExpr::Var(f) },
                     ]),
                 )),
             ],
-            tail: Val(Var(y)),
+            tail: TailExpr::Var(y),
         };
-        let code = compile(block, &mut ids.clone());
+        let code = compile(program(block, 1), &mut ids.clone());
         generate_ids!(ids => label1, label2);
         assert_eq!(code, vec![
             Push(U256::from(2)),

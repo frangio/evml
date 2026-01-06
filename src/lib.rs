@@ -8,12 +8,12 @@ mod utils;
 pub use runner::run;
 pub use compile::*;
 
-use std::{collections::HashMap, iter::once, num::NonZeroUsize};
+use std::{collections::HashMap, iter::{once, zip}, num::NonZeroUsize};
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use revm::{bytecode::opcode, primitives::U256};
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Id(NonZeroUsize);
 
 #[cfg_attr(test, derive(Clone))]
@@ -54,6 +54,7 @@ pub mod ast {
         Unit,
         Val(Val<T>),
         Op(u8, Vec<Val<T>>),
+        Apply(T, Vec<Val<T>>),
         IfThenElse(Box<(Expr<T>, [Block<T>; 2])>),
     }
 
@@ -64,6 +65,16 @@ pub mod ast {
     pub struct Block<T> {
         pub priors: Vec<BlockPrior<T>>,
         pub tail: Expr<T>,
+    }
+
+    pub struct Proc<T> {
+        pub args: Vec<T>,
+        pub rets: usize,
+        pub body: Block<T>,
+    }
+
+    pub struct Program<T> {
+        pub procs: Vec<(T, Proc<T>)>,
     }
 }
 
@@ -82,7 +93,16 @@ pub mod core {
         Unit,
         Val(Val),
         Op(u8, Vec<Val>),
-        IfThenElse(Val, Box<[Block; 2]>),
+        Apply(Id, Vec<Val>),
+        IfThenElse(Id, Box<[Block; 2]>),
+    }
+
+    #[derive(PartialEq, Eq, Debug)]
+    pub enum TailExpr {
+        Unit,
+        Var(Id),
+        Apply(Id, Vec<Val>),
+        IfThenElse(Id, Box<[Block; 2]>),
     }
 
     #[derive(PartialEq, Eq, Debug)]
@@ -93,7 +113,21 @@ pub mod core {
     #[derive(PartialEq, Eq, Debug)]
     pub struct Block {
         pub priors: Vec<BlockPrior>,
-        pub tail: Expr,
+        pub tail: TailExpr,
+    }
+
+    #[derive(PartialEq, Eq, Debug)]
+    pub struct Proc {
+        pub args: Vec<Id>,
+        pub rets: usize,
+        pub body: Block,
+    }
+
+    #[derive(PartialEq, Eq, Debug)]
+    pub struct Program {
+        pub main: Block,
+        pub rets: usize,
+        pub procs: Vec<(Id, Proc)>,
     }
 
     impl Default for Val {
@@ -207,11 +241,28 @@ fn instruction_push<const N: usize>(value: [u8; N]) -> impl ExactSizeIterator<It
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Type {
     Val,
+    Proc { args: usize, rets: usize },
 }
 
-pub fn type_check(block: &ast::Block<Id>) -> Result<()> {
-    let env = HashMap::new();
-    type_check_block(block, env)?;
+pub fn type_check(program: &ast::Program<Id>) -> Result<()> {
+    let mut env = HashMap::with_capacity(program.procs.len());
+    for (id, proc) in &program.procs {
+        env.insert(*id, Type::Proc { args: proc.args.len(), rets: proc.rets });
+    }
+    for (_, proc) in &program.procs {
+        type_check_proc(proc, &env)?;
+    }
+    Ok(())
+}
+
+fn type_check_proc(proc: &ast::Proc<Id>, prog_env: &HashMap<Id, Type>) -> Result<()> {
+    let mut env = prog_env.clone();
+    env.reserve(proc.args.len());
+    for &arg in &proc.args {
+        env.insert(arg, Type::Val);
+    }
+    let rets = type_check_block(&proc.body, env)?;
+    ensure!(rets == proc.rets, "procedure return size mismatch");
     Ok(())
 }
 
@@ -256,6 +307,17 @@ fn type_check_expr(expr: &ast::Expr<Id>, env: &HashMap<Id, Type>) -> Result<usiz
             Ok(info.outputs)
         }
 
+        Expr::Apply(proc_id, args) => {
+            let Some(Type::Proc { args: expected_args, rets }) = env.get(proc_id).copied() else {
+                bail!("not a procedure");
+            };
+            ensure!(args.len() == expected_args, "wrong number of arguments");
+            for arg in args {
+                type_check_val(arg)?;
+            }
+            Ok(rets)
+        }
+
         Expr::IfThenElse(cond_then_else) => {
             let (cond, then_else) = cond_then_else.as_ref();
             let outputs = type_check_expr(cond, env)?;
@@ -268,8 +330,16 @@ fn type_check_expr(expr: &ast::Expr<Id>, env: &HashMap<Id, Type>) -> Result<usiz
     }
 }
 
-pub fn lower(block: ast::Block<Id>, ids: &mut IdGen) -> core::Block {
-    lower_block(block, ids)
+pub fn lower(program: ast::Program<Id>, ids: &mut IdGen) -> core::Program {
+    let mut procs_iter = program.procs.into_iter();
+    let (_, main_proc) = procs_iter.next().expect("no procs in program");
+    assert!(main_proc.args.is_empty());
+    let main = lower_block(main_proc.body, ids);
+    let procs = procs_iter.map(|(name, ast::Proc { args, rets, body })| {
+        let body = lower_block(body, ids);
+        (name, core::Proc { args, rets, body })
+    }).collect();
+    core::Program { main, rets: main_proc.rets, procs }
 }
 
 fn lower_block(block: ast::Block<Id>, ids: &mut IdGen) -> core::Block {
@@ -284,9 +354,54 @@ fn lower_block(block: ast::Block<Id>, ids: &mut IdGen) -> core::Block {
         }
     }
 
-    let tail = lower_expr(block.tail, &mut priors, ids);
+    let tail = lower_tail(block.tail, &mut priors, ids);
 
     core::Block { priors, tail }
+}
+
+fn lower_tail(
+    expr: ast::Expr<Id>,
+    priors: &mut Vec<core::BlockPrior>,
+    ids: &mut IdGen,
+) -> core::TailExpr {
+    match expr {
+        ast::Expr::Unit => core::TailExpr::Unit,
+        ast::Expr::Val(ast::Val::Var(x)) => core::TailExpr::Var(x),
+        ast::Expr::Val(ast::Val::Const(c)) => {
+            let x = ids.generate();
+            priors.push(core::BlockPrior::Let(Some(x), core::Expr::Val(core::Val::Const(c))));
+            core::TailExpr::Var(x)
+        }
+        ast::Expr::Op(op, vals) => {
+            let expr = core::Expr::Op(op, vals.into_iter().map(lower_val).collect());
+            if opcodes::info(op).unwrap().outputs == 0 {
+                priors.push(core::BlockPrior::Let(None, expr));
+                core::TailExpr::Unit
+            } else {
+                let x = ids.generate();
+                priors.push(core::BlockPrior::Let(Some(x), expr));
+                core::TailExpr::Var(x)
+            }
+        }
+        ast::Expr::Apply(proc_id, vals) => {
+            core::TailExpr::Apply(proc_id, vals.into_iter().map(lower_val).collect())
+        }
+        ast::Expr::IfThenElse(cond_then_else) => {
+            let (cond, then_else) = *cond_then_else;
+            let cond = match lower_expr(cond, priors, ids) {
+                core::Expr::Val(core::Val::Var(x)) => x,
+                expr => {
+                    let x = ids.generate();
+                    priors.push(core::BlockPrior::Let(Some(x), expr));
+                    x
+                }
+            };
+            let [then_block, else_block] = then_else;
+            let then_block = lower_block(then_block, ids);
+            let else_block = lower_block(else_block, ids);
+            core::TailExpr::IfThenElse(cond, Box::new([then_block, else_block]))
+        }
+    }
 }
 
 fn lower_expr(
@@ -300,14 +415,17 @@ fn lower_expr(
         ast::Expr::Op(op, vals) => {
             core::Expr::Op(op, vals.into_iter().map(lower_val).collect())
         }
+        ast::Expr::Apply(proc_id, vals) => {
+            core::Expr::Apply(proc_id, vals.into_iter().map(lower_val).collect())
+        }
         ast::Expr::IfThenElse(cond_then_else) => {
             let (cond, then_else) = *cond_then_else;
             let cond = match lower_expr(cond, priors, ids) {
-                core::Expr::Val(val) => val,
+                core::Expr::Val(core::Val::Var(x)) => x,
                 expr => {
                     let x = ids.generate();
                     priors.push(core::BlockPrior::Let(Some(x), expr));
-                    core::Val::Var(x)
+                    x
                 }
             };
             let [then_block, else_block] = then_else;
@@ -328,9 +446,39 @@ fn lower_val(val: ast::Val<Id>) -> core::Val {
     }
 }
 
-pub fn resolve(block: &ast::Block<&str>, ids: &mut IdGen) -> Result<ast::Block<Id>> {
-    let env = HashMap::new();
-    resolve_block(block, ids, env)
+pub fn resolve(program: &ast::Program<&str>, ids: &mut IdGen) -> Result<ast::Program<Id>> {
+    let mut prog_env = HashMap::with_capacity(program.procs.len());
+
+    for &(name, _) in &program.procs {
+        let id = ids.generate();
+        if prog_env.insert(name, id).is_some() {
+            bail!("duplicate procedure {name}");
+        }
+    }
+
+    let mut procs = Vec::with_capacity(program.procs.len());
+
+    for (name, proc) in &program.procs {
+        let id = prog_env[name];
+        let proc = resolve_proc(proc, ids, &prog_env)?;
+        procs.push((id, proc));
+    }
+
+    Ok(ast::Program { procs })
+}
+
+fn resolve_proc(proc: &ast::Proc<&str>, ids: &mut IdGen, prog_env: &HashMap<&str, Id>) -> Result<ast::Proc<Id>> {
+    let mut env = prog_env.clone();
+    env.reserve(proc.args.len());
+    let args = proc.args.iter().map(|_| ids.generate()).collect::<Vec<_>>();
+    let first = args.first().copied();
+    for (&arg, &id) in zip(&proc.args, &args) {
+        if env.insert(arg, id) >= first {
+            bail!("duplicate argument {arg}");
+        }
+    }
+    let body = resolve_block(&proc.body, ids, env)?;
+    Ok(ast::Proc { args, rets: proc.rets, body })
 }
 
 fn resolve_block<'a>(
@@ -375,6 +523,11 @@ fn resolve_expr(
             let vals = vals.iter().map(|val| resolve_val(val, env)).collect::<Result<_>>()?;
             Expr::Op(*op, vals)
         }
+        Expr::Apply(name, vals) => {
+            let id = *env.get(name).with_context(|| format!("unbound procedure {name}"))?;
+            let vals = vals.iter().map(|val| resolve_val(val, env)).collect::<Result<_>>()?;
+            Expr::Apply(id, vals)
+        }
         Expr::IfThenElse(cond_then_else) => {
             let (cond, then_else) = cond_then_else.as_ref();
             let cond = resolve_expr(cond, ids, env)?;
@@ -396,11 +549,11 @@ fn resolve_val(val: &ast::Val<&str>, env: &HashMap<&str, Id>) -> Result<ast::Val
     })
 }
 
-pub fn parse(source: &str) -> Result<ast::Block<&str>> {
+pub fn parse(source: &str) -> Result<ast::Program<&str>> {
     use chumsky::prelude::*;
     use ast::*;
 
-    fn parser<'a>() -> impl Parser<'a, &'a str, Block<&'a str>, extra::Err<Rich<'a, char>>> {
+    fn parser<'a>() -> impl Parser<'a, &'a str, Program<&'a str>, extra::Err<Rich<'a, char>>> {
         let val_const = text::digits(10)
             .to_slice()
             .try_map(|digits: &str, span| {
@@ -435,6 +588,14 @@ pub fn parse(source: &str) -> Result<ast::Block<&str>> {
                     )
                     .map(|(op, args)| Expr::Op(op, args));
 
+                let expr_apply = text::ident()
+                    .then(
+                        val.separated_by(just(','))
+                            .collect::<Vec<_>>()
+                            .delimited_by(just('('), just(')'))
+                    )
+                    .map(|(name, args)| Expr::Apply(name, args));
+
                 let expr_if = text::keyword("if")
                     .padded()
                     .ignore_then(expr.clone())
@@ -452,6 +613,7 @@ pub fn parse(source: &str) -> Result<ast::Block<&str>> {
                 choice((
                     expr_if,
                     expr_op,
+                    expr_apply,
                     expr_val,
                 ))
                 .padded()
@@ -480,163 +642,219 @@ pub fn parse(source: &str) -> Result<ast::Block<&str>> {
                 .map(|(priors, tail)| Block { priors, tail: tail.unwrap_or(Expr::Unit) })
         });
 
-        block.then_ignore(end())
+        let rets = just("->")
+            .padded()
+            .ignore_then(text::keyword("u256"))
+            .to(1usize)
+            .padded()
+            .or_not()
+            .map(|r| r.unwrap_or(0));
+
+        let proc = text::keyword("fn")
+            .padded()
+            .ignore_then(text::ident())
+            .then(
+                text::ident()
+                    .padded()
+                    .separated_by(just(','))
+                    .collect::<Vec<_>>()
+                    .delimited_by(just('('), just(')'))
+                    .padded()
+            )
+            .then(rets)
+            .then(block.delimited_by(just('{'), just('}')))
+            .map(|(((name, args), rets), body)| (name, Proc { args, rets, body }));
+
+        proc.padded()
+            .repeated()
+            .collect::<Vec<_>>()
+            .map(|procs| Program { procs })
+            .then_ignore(end())
     }
 
-    let b = parser()
+    let p = parser()
         .parse(source)
         .into_result()
         .map_err(|es| anyhow!(es[0].to_string()))?;
 
-    Ok(b)
+    Ok(p)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn program(main: core::Block, rets: usize) -> core::Program {
+        core::Program { main, rets, procs: vec![] }
+    }
+
     #[test]
     fn test_const() {
-        use super::core::{Block, Expr::*, Val::*};
+        use super::core::{Block, BlockPrior::*, Expr::*, TailExpr, Val::*};
         let mut ids = IdGen::new();
+        generate_ids!(ids => r);
         let block = Block {
-            priors: vec![],
-            tail: Val(Const(U256::from(42))),
+            priors: vec![Let(Some(r), Val(Const(U256::from(42))))],
+            tail: TailExpr::Var(r),
         };
-        let code = compile(block, &mut ids);
+        let code = compile(program(block, 1), &mut ids);
         let stack = run(&assemble(&code)).expect("execution failed");
         assert_eq!(stack, vec![U256::from(42)]);
     }
 
     #[test]
     fn test_op_div() {
-        use super::core::{Block, Expr::*, Val::*};
+        use super::core::{Block, BlockPrior::*, Expr::*, TailExpr, Val::*};
         let mut ids = IdGen::new();
+        generate_ids!(ids => r);
         let block = Block {
-            priors: vec![],
-            tail: Op(0x04, vec![Const(U256::from(84)), Const(U256::from(2))]),
+            priors: vec![Let(Some(r), Op(0x04, vec![Const(U256::from(84)), Const(U256::from(2))]))],
+            tail: TailExpr::Var(r),
         };
-        let code = compile(block, &mut ids);
+        let code = compile(program(block, 1), &mut ids);
         let stack = run(&assemble(&code)).expect("execution failed");
         assert_eq!(stack, vec![U256::from(42)]);
     }
 
     #[test]
     fn test_let_val() {
-        use super::core::{Block, BlockPrior::*, Expr::*, Val::*};
+        use super::core::{Block, BlockPrior::*, Expr::*, TailExpr, Val::*};
         let mut ids = IdGen::new();
-        generate_ids!(ids => x);
+        generate_ids!(ids => x, r);
         let block = Block {
             priors: vec![
                 Let(Some(x), Val(Const(U256::from(2)))),
+                Let(Some(r), Op(0x04, vec![Const(U256::from(84)), Var(x)])),
             ],
-            tail: Op(0x04, vec![Const(U256::from(84)), Var(x)]),
+            tail: TailExpr::Var(r),
         };
-        let code = compile(block, &mut ids);
+        let code = compile(program(block, 1), &mut ids);
         let stack = run(&assemble(&code)).expect("execution failed");
         assert_eq!(stack, vec![U256::from(42)]);
     }
 
     #[test]
     fn test_let_op() {
-        use super::core::{Block, BlockPrior::*, Expr::*, Val::*};
+        use super::core::{Block, BlockPrior::*, Expr::*, TailExpr, Val::*};
         let mut ids = IdGen::new();
         generate_ids!(ids => x);
         let block = Block {
             priors: vec![
                 Let(Some(x), Op(0x04, vec![Const(U256::from(84)), Const(U256::from(2))])),
             ],
-            tail: Val(Var(x)),
+            tail: TailExpr::Var(x),
         };
-        let code = compile(block, &mut ids);
+        let code = compile(program(block, 1), &mut ids);
         let stack = run(&assemble(&code)).expect("execution failed");
         assert_eq!(stack, vec![U256::from(42)]);
     }
 
     #[test]
     fn test_let_op_reuse() {
-        use super::core::{Block, BlockPrior::*, Expr::*, Val::*};
+        use super::core::{Block, BlockPrior::*, Expr::*, TailExpr, Val::*};
         let mut ids = IdGen::new();
-        generate_ids!(ids => x);
+        generate_ids!(ids => x, r);
         let block = Block {
             priors: vec![
                 Let(Some(x), Val(Const(U256::from(42)))),
+                Let(Some(r), Op(0x04, vec![Var(x), Var(x)])),
             ],
-            tail: Op(0x04, vec![Var(x), Var(x)]),
+            tail: TailExpr::Var(r),
         };
-        let code = compile(block, &mut ids);
+        let code = compile(program(block, 1), &mut ids);
         let stack = run(&assemble(&code)).expect("execution failed");
         assert_eq!(stack, vec![U256::from(1)]);
     }
 
     #[test]
     fn test_let_unused() {
-        use super::core::{Block, BlockPrior::*, Expr::*, Val::*};
+        use super::core::{Block, BlockPrior::*, Expr::*, TailExpr, Val::*};
         let mut ids = IdGen::new();
-        generate_ids!(ids => x, y);
+        generate_ids!(ids => x, y, r);
         let block = Block {
             priors: vec![
                 Let(Some(x), Val(Const(U256::from(100)))),
                 Let(Some(y), Val(Const(U256::from(100)))),
+                Let(Some(r), Val(Const(U256::from(42)))),
             ],
-            tail: Val(Const(U256::from(42))),
+            tail: TailExpr::Var(r),
         };
-        let code = compile(block, &mut ids);
+        let code = compile(program(block, 1), &mut ids);
         let stack = run(&assemble(&code)).expect("execution failed");
         assert_eq!(stack, vec![U256::from(42)]);
     }
 
     #[test]
     fn test_type_check_div_ok() {
-        use super::ast::{Block, Expr::*, Val::*};
-        let block = Block {
-            priors: vec![],
-            tail: Op(0x04, vec![Const(U256::from(84)), Const(U256::from(2))]),
+        use super::ast::{Block, Expr::*, Proc, Program, Val::*};
+        let mut ids = IdGen::new();
+        generate_ids!(ids => main);
+        let program = Program {
+            procs: vec![(main, Proc {
+                args: vec![],
+                rets: 1,
+                body: Block {
+                    priors: vec![],
+                    tail: Op(0x04, vec![Const(U256::from(84)), Const(U256::from(2))]),
+                },
+            })],
         };
-        assert!(type_check(&block).is_ok());
+        assert!(type_check(&program).is_ok());
     }
 
     #[test]
     fn test_type_check_div_err() {
-        use super::ast::{Block, Expr::*, Val::*};
-        let block = Block {
-            priors: vec![],
-            tail: Op(0x04, vec![Const(U256::from(84))]),
+        use super::ast::{Block, Expr::*, Proc, Program, Val::*};
+        let mut ids = IdGen::new();
+        generate_ids!(ids => main);
+        let program = Program {
+            procs: vec![(main, Proc {
+                args: vec![],
+                rets: 1,
+                body: Block {
+                    priors: vec![],
+                    tail: Op(0x04, vec![Const(U256::from(84))]),
+                },
+            })],
         };
-        assert!(type_check(&block).is_err());
+        assert!(type_check(&program).is_err());
     }
 
     #[test]
     fn test_type_check_pop_err() {
-        use super::ast::{Block, BlockPrior::*, Expr::*, Val::*};
+        use super::ast::{Block, BlockPrior::*, Expr::*, Proc, Program, Val::*};
         let mut ids = IdGen::new();
-        generate_ids!(ids => x);
-        let block = Block {
-            priors: vec![
-                Let(Some(x), Op(0x50, vec![Const(U256::from(42))])),
-            ],
-            tail: Val(Const(U256::from(0))),
+        generate_ids!(ids => main, x);
+        let program = Program {
+            procs: vec![(main, Proc {
+                args: vec![],
+                rets: 0,
+                body: Block {
+                    priors: vec![
+                        Let(Some(x), Op(0x50, vec![Const(U256::from(42))])),
+                    ],
+                    tail: Val(Const(U256::from(0))),
+                },
+            })],
         };
-        assert!(type_check(&block).is_err());
+        assert!(type_check(&program).is_err());
     }
 
     #[test]
     fn test_parse_if_then_else() {
-        let source = "let c = 1; if c { @add(c, 1) } else { c }";
-        let block = parse(source).expect("parse failed");
+        let source = "fn main() -> u256 { let c = 1; if c { @add(c, 1) } else { c } }";
+        let program = parse(source).expect("parse failed");
         let mut ids = IdGen::new();
-        let resolved = resolve(&block, &mut ids).expect("resolve failed");
+        let resolved = resolve(&program, &mut ids).expect("resolve failed");
         type_check(&resolved).expect("type check failed");
-        let _lowered = lower(resolved, &mut ids);
     }
 
     #[test]
     fn test_parse_if_then_else_expr_cond() {
-        let source = "let c = 1; if @eq(c, 1) { 2 } else { 3 }";
-        let block = parse(source).expect("parse failed");
+        let source = "fn main() -> u256 { let c = 1; if @eq(c, 1) { 2 } else { 3 } }";
+        let program = parse(source).expect("parse failed");
         let mut ids = IdGen::new();
-        let resolved = resolve(&block, &mut ids).expect("resolve failed");
+        let resolved = resolve(&program, &mut ids).expect("resolve failed");
         type_check(&resolved).expect("type check failed");
-        let _lowered = lower(resolved, &mut ids);
     }
 }
