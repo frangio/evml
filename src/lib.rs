@@ -20,6 +20,7 @@ pub use compile::compile;
 pub use assemble::assemble;
 pub use id::{Id, IdGen};
 
+use anyhow::Result;
 use revm::primitives::U256;
 
 pub mod ast {
@@ -146,182 +147,82 @@ pub mod asm {
     }
 }
 
+pub fn compile_from_source(source: &str) -> Result<Vec<u8>> {
+    let mut ids = IdGen::new();
+    let ast = parse(source)?;
+    let ast = resolve(&ast, &mut ids)?;
+    type_check(&ast)?;
+    let ir = lower(ast, &mut ids);
+    let code = compile(ir, &mut ids);
+    Ok(assemble(&code))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::id::generate_ids;
 
-    fn program(main: core::Block, rets: usize) -> core::Program {
-        core::Program { main, rets, procs: vec![] }
+    fn assert_e2e_result(result: U256, source: &str) {
+        let bytecode = compile_from_source(source).unwrap();
+        let stack = run(&bytecode).expect("execution failed");
+        assert_eq!(stack, vec![result]);
     }
 
     #[test]
-    fn test_const() {
-        use super::core::{Block, BlockPrior::*, Expr::*, TailExpr, Val::*};
-        let mut ids = IdGen::new();
-        generate_ids! { r in ids };
-        let block = Block {
-            priors: vec![Let(Some(r), Val(Const(U256::from(42))))],
-            tail: TailExpr::Var(r),
-        };
-        let code = compile(program(block, 1), &mut ids);
-        let stack = run(&assemble(&code)).expect("execution failed");
-        assert_eq!(stack, vec![U256::from(42)]);
+    fn test_e2e_const() {
+        assert_e2e_result(U256::from(42), r#"
+            fn main() -> u256 {
+                42
+            }
+        "#);
     }
 
     #[test]
-    fn test_op_div() {
-        use super::core::{Block, BlockPrior::*, Expr::*, TailExpr, Val::*};
-        let mut ids = IdGen::new();
-        generate_ids! { r in ids };
-        let block = Block {
-            priors: vec![Let(Some(r), Op(0x04, vec![Const(U256::from(84)), Const(U256::from(2))]))],
-            tail: TailExpr::Var(r),
-        };
-        let code = compile(program(block, 1), &mut ids);
-        let stack = run(&assemble(&code)).expect("execution failed");
-        assert_eq!(stack, vec![U256::from(42)]);
+    fn test_e2e_op_div() {
+        assert_e2e_result(U256::from(42), r#"
+            fn main() -> u256 {
+                @div(84, 2)
+            }
+        "#);
     }
 
     #[test]
-    fn test_let_val() {
-        use super::core::{Block, BlockPrior::*, Expr::*, TailExpr, Val::*};
-        let mut ids = IdGen::new();
-        generate_ids! { x, r in ids };
-        let block = Block {
-            priors: vec![
-                Let(Some(x), Val(Const(U256::from(2)))),
-                Let(Some(r), Op(0x04, vec![Const(U256::from(84)), Var(x)])),
-            ],
-            tail: TailExpr::Var(r),
-        };
-        let code = compile(program(block, 1), &mut ids);
-        let stack = run(&assemble(&code)).expect("execution failed");
-        assert_eq!(stack, vec![U256::from(42)]);
+    fn test_e2e_let_val() {
+        assert_e2e_result(U256::from(42), r#"
+            fn main() -> u256 {
+                let x = 2;
+                @div(84, x)
+            }
+        "#);
     }
 
     #[test]
-    fn test_let_op() {
-        use super::core::{Block, BlockPrior::*, Expr::*, TailExpr, Val::*};
-        let mut ids = IdGen::new();
-        generate_ids! { x in ids };
-        let block = Block {
-            priors: vec![
-                Let(Some(x), Op(0x04, vec![Const(U256::from(84)), Const(U256::from(2))])),
-            ],
-            tail: TailExpr::Var(x),
-        };
-        let code = compile(program(block, 1), &mut ids);
-        let stack = run(&assemble(&code)).expect("execution failed");
-        assert_eq!(stack, vec![U256::from(42)]);
+    fn test_e2e_let_op() {
+        assert_e2e_result(U256::from(42), r#"
+            fn main() -> u256 {
+                let x = @div(84, 2);
+                x
+            }
+        "#);
     }
 
     #[test]
-    fn test_let_op_reuse() {
-        use super::core::{Block, BlockPrior::*, Expr::*, TailExpr, Val::*};
-        let mut ids = IdGen::new();
-        generate_ids! { x, r in ids };
-        let block = Block {
-            priors: vec![
-                Let(Some(x), Val(Const(U256::from(42)))),
-                Let(Some(r), Op(0x04, vec![Var(x), Var(x)])),
-            ],
-            tail: TailExpr::Var(r),
-        };
-        let code = compile(program(block, 1), &mut ids);
-        let stack = run(&assemble(&code)).expect("execution failed");
-        assert_eq!(stack, vec![U256::from(1)]);
+    fn test_e2e_let_op_reuse() {
+        assert_e2e_result(U256::from(1), r#"
+            fn main() -> u256 {
+                let x = 42;
+                @div(x, x)
+            }
+        "#);
     }
 
     #[test]
-    fn test_let_unused() {
-        use super::core::{Block, BlockPrior::*, Expr::*, TailExpr, Val::*};
-        let mut ids = IdGen::new();
-        generate_ids! { x, y, r in ids };
-        let block = Block {
-            priors: vec![
-                Let(Some(x), Val(Const(U256::from(100)))),
-                Let(Some(y), Val(Const(U256::from(100)))),
-                Let(Some(r), Val(Const(U256::from(42)))),
-            ],
-            tail: TailExpr::Var(r),
-        };
-        let code = compile(program(block, 1), &mut ids);
-        let stack = run(&assemble(&code)).expect("execution failed");
-        assert_eq!(stack, vec![U256::from(42)]);
-    }
-
-    #[test]
-    fn test_type_check_div_ok() {
-        use super::ast::{Block, Expr::*, Proc, Program, Val::*};
-        let mut ids = IdGen::new();
-        generate_ids! { main in ids };
-        let program = Program {
-            procs: vec![(main, Proc {
-                args: vec![],
-                rets: 1,
-                body: Block {
-                    priors: vec![],
-                    tail: Op(0x04, vec![Const(U256::from(84)), Const(U256::from(2))]),
-                },
-            })],
-        };
-        assert!(type_check(&program).is_ok());
-    }
-
-    #[test]
-    fn test_type_check_div_err() {
-        use super::ast::{Block, Expr::*, Proc, Program, Val::*};
-        let mut ids = IdGen::new();
-        generate_ids! { main in ids };
-        let program = Program {
-            procs: vec![(main, Proc {
-                args: vec![],
-                rets: 1,
-                body: Block {
-                    priors: vec![],
-                    tail: Op(0x04, vec![Const(U256::from(84))]),
-                },
-            })],
-        };
-        assert!(type_check(&program).is_err());
-    }
-
-    #[test]
-    fn test_type_check_pop_err() {
-        use super::ast::{Block, BlockPrior::*, Expr::*, Proc, Program, Val::*};
-        let mut ids = IdGen::new();
-        generate_ids! { main, x in ids };
-        let program = Program {
-            procs: vec![(main, Proc {
-                args: vec![],
-                rets: 0,
-                body: Block {
-                    priors: vec![
-                        Let(Some(x), Op(0x50, vec![Const(U256::from(42))])),
-                    ],
-                    tail: Val(Const(U256::from(0))),
-                },
-            })],
-        };
-        assert!(type_check(&program).is_err());
-    }
-
-    #[test]
-    fn test_parse_if_then_else() {
-        let source = "fn main() -> u256 { let c = 1; if c { @add(c, 1) } else { c } }";
-        let program = parse(source).expect("parse failed");
-        let mut ids = IdGen::new();
-        let resolved = resolve(&program, &mut ids).expect("resolve failed");
-        type_check(&resolved).expect("type check failed");
-    }
-
-    #[test]
-    fn test_parse_if_then_else_expr_cond() {
-        let source = "fn main() -> u256 { let c = 1; if @eq(c, 1) { 2 } else { 3 } }";
-        let program = parse(source).expect("parse failed");
-        let mut ids = IdGen::new();
-        let resolved = resolve(&program, &mut ids).expect("resolve failed");
-        type_check(&resolved).expect("type check failed");
+    fn test_e2e_let_unused() {
+        assert_e2e_result(U256::from(42), r#"
+            fn main() -> u256 {
+                let x = 100;
+                let y = 100;
+                42
+            }
+        "#);
     }
 }

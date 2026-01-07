@@ -93,3 +93,65 @@ fn type_check_expr(expr: &ast::Expr<Id>, env: &HashMap<Id, Type>) -> Result<usiz
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{U256, id::{generate_ids, IdGen}};
+
+    #[test]
+    fn test_type_check_div_ok() {
+        use super::ast::{Block, Expr::*, Proc, Program, Val::*};
+        let mut ids = IdGen::new();
+        generate_ids! { main in ids };
+        let program = Program {
+            procs: vec![(main, Proc {
+                args: vec![],
+                rets: 1,
+                body: Block {
+                    priors: vec![],
+                    tail: Op(0x04, vec![Const(U256::from(84)), Const(U256::from(2))]),
+                },
+            })],
+        };
+        assert!(type_check(&program).is_ok());
+    }
+
+    #[test]
+    fn test_type_check_div_err() {
+        use super::ast::{Block, Expr::*, Proc, Program, Val::*};
+        let mut ids = IdGen::new();
+        generate_ids! { main in ids };
+        let program = Program {
+            procs: vec![(main, Proc {
+                args: vec![],
+                rets: 1,
+                body: Block {
+                    priors: vec![],
+                    tail: Op(0x04, vec![Const(U256::from(84))]),
+                },
+            })],
+        };
+        assert!(type_check(&program).is_err());
+    }
+
+    #[test]
+    fn test_type_check_pop_err() {
+        use super::ast::{Block, BlockPrior::*, Expr::*, Proc, Program, Val::*};
+        let mut ids = IdGen::new();
+        generate_ids! { main, x in ids };
+        let program = Program {
+            procs: vec![(main, Proc {
+                args: vec![],
+                rets: 0,
+                body: Block {
+                    priors: vec![
+                        Let(Some(x), Op(0x50, vec![Const(U256::from(42))])),
+                    ],
+                    tail: Val(Const(U256::from(0))),
+                },
+            })],
+        };
+        assert!(type_check(&program).is_err());
+    }
+}

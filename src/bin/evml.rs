@@ -1,6 +1,6 @@
 use std::{env, fs::read_to_string};
 use anyhow::{anyhow, Result};
-use evml::{IdGen, assemble, compile, lower, parse, resolve, run, type_check};
+use evml::{compile_from_source, run};
 use revm::{bytecode::Bytecode, primitives::{Bytes, U256}};
 
 fn disasm(code: &[u8]) -> String {
@@ -29,16 +29,7 @@ fn disasm(code: &[u8]) -> String {
 fn main() -> Result<()> {
     let script_path = env::args().nth(1).ok_or(anyhow!("missing script argument"))?;
     let source = read_to_string(script_path)?;
-
-    let mut ids = IdGen::new();
-
-    let ast = parse(&source)?;
-    let ast = resolve(&ast, &mut ids)?;
-    type_check(&ast)?;
-    let ir = lower(ast, &mut ids);
-    let code = compile(ir, &mut ids);
-    let bytecode = assemble(&code);
-
+    let bytecode = compile_from_source(&source)?;
     let asm = disasm(&bytecode);
     let result = run(&bytecode);
 
