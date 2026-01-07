@@ -309,8 +309,8 @@ fn type_check_expr(expr: &ast::Expr<Id>, env: &HashMap<Id, Type>) -> Result<usiz
             Ok(info.outputs)
         }
 
-        Expr::Apply(proc_id, args) => {
-            let Some(Type::Proc { args: expected_args, rets }) = env.get(proc_id).copied() else {
+        Expr::Apply(f, args) => {
+            let Some(Type::Proc { args: expected_args, rets }) = env.get(f).copied() else {
                 bail!("not a procedure");
             };
             ensure!(args.len() == expected_args, "wrong number of arguments");
@@ -404,15 +404,15 @@ fn resolve_expr(
     use ast::*;
     Ok(match expr {
         Expr::Unit => Expr::Unit,
-        Expr::Val(val) => Expr::Val(resolve_val(val, env)?),
-        Expr::Op(op, vals) => {
-            let vals = vals.iter().map(|val| resolve_val(val, env)).collect::<Result<_>>()?;
-            Expr::Op(*op, vals)
+        Expr::Val(v) => Expr::Val(resolve_val(v, env)?),
+        Expr::Op(op, args) => {
+            let args = args.iter().map(|val| resolve_val(val, env)).collect::<Result<_>>()?;
+            Expr::Op(*op, args)
         }
-        Expr::Apply(name, vals) => {
-            let id = *env.get(name).with_context(|| format!("unbound procedure {name}"))?;
-            let vals = vals.iter().map(|val| resolve_val(val, env)).collect::<Result<_>>()?;
-            Expr::Apply(id, vals)
+        Expr::Apply(f, args) => {
+            let f = *env.get(f).with_context(|| format!("unbound procedure {f}"))?;
+            let args = args.iter().map(|val| resolve_val(val, env)).collect::<Result<_>>()?;
+            Expr::Apply(f, args)
         }
         Expr::IfThenElse(cond_then_else) => {
             let (cond, then_else) = cond_then_else.as_ref();
@@ -480,7 +480,7 @@ pub fn parse(source: &str) -> Result<ast::Program<&str>> {
                             .collect::<Vec<_>>()
                             .delimited_by(just('('), just(')'))
                     )
-                    .map(|(name, args)| Expr::Apply(name, args));
+                    .map(|(f, args)| Expr::Apply(f, args));
 
                 let expr_if = text::keyword("if")
                     .padded()

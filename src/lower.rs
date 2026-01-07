@@ -37,12 +37,12 @@ fn lower_expr(
 ) -> core::Expr {
     match expr {
         ast::Expr::Unit => core::Expr::Unit,
-        ast::Expr::Val(val) => core::Expr::Val(lower_val(val)),
-        ast::Expr::Op(op, vals) => {
-            core::Expr::Op(op, vals.into_iter().map(lower_val).collect())
+        ast::Expr::Val(v) => core::Expr::Val(lower_val(v)),
+        ast::Expr::Op(op, args) => {
+            core::Expr::Op(op, args.into_iter().map(lower_val).collect())
         }
-        ast::Expr::Apply(proc_id, vals) => {
-            core::Expr::Apply(proc_id, vals.into_iter().map(lower_val).collect())
+        ast::Expr::Apply(f, args) => {
+            core::Expr::Apply(f, args.into_iter().map(lower_val).collect())
         }
         ast::Expr::IfThenElse(cond_then_else) => {
             let (cond, then_else) = *cond_then_else;
@@ -91,8 +91,8 @@ fn expr_to_tail(
             }
         }
 
-        core::Expr::Apply(proc_id, vals) => {
-            core::TailExpr::Apply(proc_id, vals)
+        core::Expr::Apply(f, args) => {
+            core::TailExpr::Apply(f, args)
         }
 
         core::Expr::IfThenElse(cond, blocks) => {
