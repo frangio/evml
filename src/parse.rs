@@ -37,7 +37,7 @@ pub fn parse(source: &str) -> Result<ast::Program<&str>> {
                             .collect::<Vec<_>>()
                             .delimited_by(just('('), just(')'))
                     )
-                    .map(|(op, args)| Expr::Op(op, args));
+                    .map(|(op, args)| Expr::Op(op, args.into_boxed_slice()));
 
                 let expr_apply = text::ident()
                     .then(
@@ -45,7 +45,7 @@ pub fn parse(source: &str) -> Result<ast::Program<&str>> {
                             .collect::<Vec<_>>()
                             .delimited_by(just('('), just(')'))
                     )
-                    .map(|(f, args)| Expr::Apply(f, args));
+                    .map(|(f, args)| Expr::Apply(f, args.into_boxed_slice()));
 
                 let expr_if = text::keyword("if")
                     .padded()
@@ -114,7 +114,7 @@ pub fn parse(source: &str) -> Result<ast::Program<&str>> {
             )
             .then(rets)
             .then(block.delimited_by(just('{'), just('}')))
-            .map(|(((name, args), rets), body)| (name, Proc { args, rets, body }));
+            .map(|(((name, args), rets), body)| (name, Proc { args: args.into_boxed_slice(), rets, body }));
 
         proc.padded()
             .repeated()

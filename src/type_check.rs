@@ -106,11 +106,11 @@ mod tests {
         generate_ids! { main in ids };
         let program = Program {
             procs: vec![(main, Proc {
-                args: vec![],
+                args: Box::new([]),
                 rets: 1,
                 body: Block {
                     priors: vec![],
-                    tail: Op(0x04, vec![Const(U256::from(84)), Const(U256::from(2))]),
+                    tail: Op(0x04, Box::new([Const(U256::from(84)), Const(U256::from(2))])),
                 },
             })],
         };
@@ -124,11 +124,11 @@ mod tests {
         generate_ids! { main in ids };
         let program = Program {
             procs: vec![(main, Proc {
-                args: vec![],
+                args: Box::new([]),
                 rets: 1,
                 body: Block {
                     priors: vec![],
-                    tail: Op(0x04, vec![Const(U256::from(84))]),
+                    tail: Op(0x04, Box::new([Const(U256::from(84))])),
                 },
             })],
         };
@@ -142,11 +142,11 @@ mod tests {
         generate_ids! { main, x in ids };
         let program = Program {
             procs: vec![(main, Proc {
-                args: vec![],
+                args: Box::new([]),
                 rets: 0,
                 body: Block {
                     priors: vec![
-                        Let(Some(x), Op(0x50, vec![Const(U256::from(42))])),
+                        Let(Some(x), Op(0x50, Box::new([Const(U256::from(42))]))),
                     ],
                     tail: Val(Const(U256::from(0))),
                 },

@@ -26,7 +26,7 @@ pub fn resolve(program: &Program<&str>, ids: &mut IdGen) -> Result<Program<Id>> 
 fn resolve_proc(proc: &Proc<&str>, ids: &mut IdGen, prog_env: &HashMap<&str, Id>) -> Result<Proc<Id>> {
     let mut env = prog_env.clone();
     env.reserve(proc.args.len());
-    let args = proc.args.iter().map(|_| ids.generate()).collect::<Vec<_>>();
+    let args = proc.args.iter().map(|_| ids.generate()).collect::<Box<[_]>>();
     let first = args.first().copied();
     for (&arg, &id) in zip(&proc.args, &args) {
         if env.insert(arg, id) >= first {

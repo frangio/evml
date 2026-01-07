@@ -379,7 +379,7 @@ struct IndexedBlock {
 enum Cont {
     Ret(Option<Id>),
     Stop(Option<Id>),
-    Jump(Id, Vec<core::Val>),
+    Jump(Id, Box<[core::Val]>),
     JumpIf { cond: Id, then: Id },
 }
 
@@ -705,7 +705,7 @@ impl Procedure for IndexedProc {
             let input_def = block.data.input.map(|id| (InstrIdx::Input, id, DefUse::Def));
             let (cont_vals, cont_ids): (&[Val], &[Id]) = match &block.data.cont {
                 Cont::Stop(x) | Cont::Ret(x) => (&[], x.as_slice()),
-                Cont::Jump(_, args) => (args.as_slice(), &[]),
+                Cont::Jump(_, args) => (args, &[]),
                 Cont::JumpIf { cond, .. } => (&[], slice::from_ref(cond)),
             };
             (priors, input_def, cont_vals, cont_ids)
@@ -716,8 +716,8 @@ impl Procedure for IndexedProc {
             let (vals, ids): (&[Val], &[Id]) = match expr {
                 Expr::Unit => (&[], &[]),
                 Expr::Val(val) => (slice::from_ref(val), &[]),
-                Expr::Op(_, args) => (args.as_slice(), &[]),
-                Expr::Apply(_, args) => (args.as_slice(), &[]),
+                Expr::Op(_, args) => (args, &[]),
+                Expr::Apply(_, args) => (args, &[]),
                 Expr::IfThenElse(id, _) => (&[], slice::from_ref(id)),
             };
             let def_iter = def.map(|id| (InstrIdx::Prior(i), id, DefUse::Def));

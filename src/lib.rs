@@ -34,8 +34,8 @@ pub mod ast {
     pub enum Expr<T> {
         Unit,
         Val(Val<T>),
-        Op(u8, Vec<Val<T>>),
-        Apply(T, Vec<Val<T>>),
+        Op(u8, Box<[Val<T>]>),
+        Apply(T, Box<[Val<T>]>),
         IfThenElse(Box<(Expr<T>, [Block<T>; 2])>),
     }
 
@@ -49,7 +49,7 @@ pub mod ast {
     }
 
     pub struct Proc<T> {
-        pub args: Vec<T>,
+        pub args: Box<[T]>,
         pub rets: usize,
         pub body: Block<T>,
     }
@@ -72,8 +72,8 @@ pub mod core {
     pub enum Expr {
         Unit,
         Val(Val),
-        Op(u8, Vec<Val>),
-        Apply(Id, Vec<Val>),
+        Op(u8, Box<[Val]>),
+        Apply(Id, Box<[Val]>),
         IfThenElse(Id, Box<[Block; 2]>),
     }
 
@@ -81,7 +81,7 @@ pub mod core {
     pub enum TailExpr {
         Unit,
         Var(Id),
-        Apply(Id, Vec<Val>),
+        Apply(Id, Box<[Val]>),
         IfThenElse(Id, Box<[Block; 2]>),
     }
 
@@ -98,7 +98,7 @@ pub mod core {
 
     #[derive(PartialEq, Eq, Debug)]
     pub struct Proc {
-        pub args: Vec<Id>,
+        pub args: Box<[Id]>,
         pub rets: usize,
         pub body: Block,
     }
