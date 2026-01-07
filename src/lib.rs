@@ -225,4 +225,183 @@ mod tests {
             }
         "#);
     }
+
+    #[test]
+    fn test_e2e_if_else() {
+        assert_e2e_result(U256::from(1), r#"
+            fn main() -> u256 {
+                if 1 { 1 } else { 0 }
+            }
+        "#);
+        assert_e2e_result(U256::from(0), r#"
+            fn main() -> u256 {
+                if 0 { 1 } else { 0 }
+            }
+        "#);
+    }
+
+    #[test]
+    fn test_e2e_if_with_condition_expr() {
+        assert_e2e_result(U256::from(10), r#"
+            fn main() -> u256 {
+                if @gt(5, 3) { 10 } else { 20 }
+            }
+        "#);
+    }
+
+    #[test]
+    fn test_e2e_apply() {
+        assert_e2e_result(U256::from(42), r#"
+            fn main() -> u256 {
+                double(21)
+            }
+            fn double(x) -> u256 {
+                @mul(x, 2)
+            }
+        "#);
+    }
+
+    #[test]
+    fn test_e2e_apply_multiple_args() {
+        assert_e2e_result(U256::from(11), r#"
+            fn main() -> u256 {
+                let x = 7;
+                add(3, x, 1)
+            }
+            fn add(a, b, c) -> u256 {
+                let r = @add(a, b);
+                @add(r, c)
+            }
+        "#);
+    }
+
+    #[test]
+    fn test_e2e_repeated_apply() {
+        assert_e2e_result(U256::from(16), r#"
+            fn main() -> u256 {
+                let x = double(4);
+                double(x)
+            }
+            fn double(x) -> u256 {
+                @mul(x, 2)
+            }
+        "#);
+    }
+
+    #[test]
+    fn test_e2e_if_with_var_cond() {
+        assert_e2e_result(U256::from(1), r#"
+            fn main() -> u256 {
+                let cond = 1;
+                let ret = 1;
+                if cond { ret } else { 0 }
+            }
+        "#);
+    }
+
+    #[test]
+    fn test_e2e_if_nested() {
+        assert_e2e_result(U256::from(3), r#"
+            fn main() -> u256 {
+                if 1 {
+                    if 0 { 1 } else { 3 }
+                } else {
+                    2
+                }
+            }
+        "#);
+    }
+
+    #[test]
+    fn test_e2e_if_in_apply() {
+        assert_e2e_result(U256::from(10), r#"
+            fn main() -> u256 {
+                choose(1)
+            }
+            fn choose(x) -> u256 {
+                if x { 10 } else { 20 }
+            }
+        "#);
+    }
+
+    #[test]
+    fn test_e2e_if_without_else() {
+        assert_e2e_result(U256::from(42), r#"
+            fn main() -> u256 {
+                let _ = if 1 {
+                    let _ = @mstore(0, 42);
+                };
+                @mload(0)
+            }
+        "#);
+    }
+
+    #[test]
+    fn test_e2e_tail_call_in_main() {
+        assert_e2e_result(U256::from(42), r#"
+            fn main() -> u256 {
+                identity(42)
+            }
+            fn identity(x) -> u256 {
+                x
+            }
+        "#);
+    }
+
+    #[test]
+    fn test_e2e_tail_call_in_proc() {
+        assert_e2e_result(U256::from(42), r#"
+            fn main() -> u256 {
+                outer(21)
+            }
+            fn outer(x) -> u256 {
+                inner(x)
+            }
+            fn inner(x) -> u256 {
+                @mul(x, 2)
+            }
+        "#);
+    }
+
+    #[test]
+    fn test_e2e_apply_three_args() {
+        assert_e2e_result(U256::from(15), r#"
+            fn main() -> u256 {
+                add_three(5, 7, 3)
+            }
+            fn add_three(a, b, c) -> u256 {
+                let ab = @add(a, b);
+                @add(ab, c)
+            }
+        "#);
+    }
+
+    #[test]
+    fn test_e2e_stack_management_across_if() {
+        assert_e2e_result(U256::from(3), r#"
+            fn main() -> u256 {
+                let a = 1;
+                let b = 2;
+                let dead = 99;
+                let r = if 1 { a } else { b };
+                @add(r, b)
+            }
+        "#);
+    }
+
+    #[test]
+    fn test_e2e_void_tail_op() {
+        assert_e2e_result(U256::from(99), r#"
+            fn main() -> u256 {
+                store_and_load()
+            }
+            fn store_and_load() -> u256 {
+                let _ = store(99);
+                @mload(0)
+            }
+            fn store(x) {
+                @mstore(0, x)
+            }
+        "#);
+    }
 }
