@@ -62,6 +62,12 @@ impl FromIterator<Id> for Stack {
     }
 }
 
+impl Extend<Id> for Stack {
+    fn extend<T: IntoIterator<Item = Id>>(&mut self, iter: T) {
+        self.0.extend(iter.into_iter().map(Some))
+    }
+}
+
 impl StackEntry<'_> {
     fn var(&self) -> Id {
         self.stack.0[self.index].expect("stack item is temporary")
@@ -104,9 +110,8 @@ fn compile_proc(body: core::Block, args: &[Id], stop: Option<usize>, ids: &mut I
         }
         let hash_map::Entry::Occupied(mut stack_entry) = stacks.entry(block_id) else { panic!() };
         let stack = stack_entry.get_mut();
-        if let Some(input) = block.data.input {
-            stack.push(Some(input));
-        }
+        stack.extend(block.data.input);
+
         let liveness = &analysis.liveness[block_id.index()];
         for (i, prior) in block.priors().iter().enumerate() {
             let is_last_use = |x| liveness.last_use(x) == InstrIdx::Prior(i);
