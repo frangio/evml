@@ -354,54 +354,10 @@ fn lower_block(block: ast::Block<Id>, ids: &mut IdGen) -> core::Block {
         }
     }
 
-    let tail = lower_tail(block.tail, &mut priors, ids);
+    let tail = lower_expr(block.tail, &mut priors, ids);
+    let tail = expr_to_tail(tail, &mut priors, ids);
 
     core::Block { priors, tail }
-}
-
-fn lower_tail(
-    expr: ast::Expr<Id>,
-    priors: &mut Vec<core::BlockPrior>,
-    ids: &mut IdGen,
-) -> core::TailExpr {
-    match expr {
-        ast::Expr::Unit => core::TailExpr::Unit,
-        ast::Expr::Val(ast::Val::Var(x)) => core::TailExpr::Var(x),
-        ast::Expr::Val(ast::Val::Const(c)) => {
-            let x = ids.generate();
-            priors.push(core::BlockPrior::Let(Some(x), core::Expr::Val(core::Val::Const(c))));
-            core::TailExpr::Var(x)
-        }
-        ast::Expr::Op(op, vals) => {
-            let expr = core::Expr::Op(op, vals.into_iter().map(lower_val).collect());
-            if opcodes::info(op).unwrap().outputs == 0 {
-                priors.push(core::BlockPrior::Let(None, expr));
-                core::TailExpr::Unit
-            } else {
-                let x = ids.generate();
-                priors.push(core::BlockPrior::Let(Some(x), expr));
-                core::TailExpr::Var(x)
-            }
-        }
-        ast::Expr::Apply(proc_id, vals) => {
-            core::TailExpr::Apply(proc_id, vals.into_iter().map(lower_val).collect())
-        }
-        ast::Expr::IfThenElse(cond_then_else) => {
-            let (cond, then_else) = *cond_then_else;
-            let cond = match lower_expr(cond, priors, ids) {
-                core::Expr::Val(core::Val::Var(x)) => x,
-                expr => {
-                    let x = ids.generate();
-                    priors.push(core::BlockPrior::Let(Some(x), expr));
-                    x
-                }
-            };
-            let [then_block, else_block] = then_else;
-            let then_block = lower_block(then_block, ids);
-            let else_block = lower_block(else_block, ids);
-            core::TailExpr::IfThenElse(cond, Box::new([then_block, else_block]))
-        }
-    }
 }
 
 fn lower_expr(
@@ -435,6 +391,42 @@ fn lower_expr(
                 cond,
                 Box::new([then_block, else_block]),
             )
+        }
+    }
+}
+
+fn expr_to_tail(
+    expr: core::Expr,
+    priors: &mut Vec<core::BlockPrior>,
+    ids: &mut IdGen,
+) -> core::TailExpr {
+    match expr {
+        core::Expr::Unit => core::TailExpr::Unit,
+        core::Expr::Val(core::Val::Var(x)) => core::TailExpr::Var(x),
+
+        core::Expr::Val(core::Val::Const(c)) => {
+            let x = ids.generate();
+            priors.push(core::BlockPrior::Let(Some(x), core::Expr::Val(core::Val::Const(c))));
+            core::TailExpr::Var(x)
+        }
+
+        core::Expr::Op(op, _) => {
+            if opcodes::info(op).unwrap().outputs == 0 {
+                priors.push(core::BlockPrior::Let(None, expr));
+                core::TailExpr::Unit
+            } else {
+                let x = ids.generate();
+                priors.push(core::BlockPrior::Let(Some(x), expr));
+                core::TailExpr::Var(x)
+            }
+        }
+
+        core::Expr::Apply(proc_id, vals) => {
+            core::TailExpr::Apply(proc_id, vals)
+        }
+
+        core::Expr::IfThenElse(cond, blocks) => {
+            core::TailExpr::IfThenElse(cond, blocks)
         }
     }
 }
