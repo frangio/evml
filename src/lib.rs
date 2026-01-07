@@ -159,7 +159,7 @@ mod tests {
     fn test_const() {
         use super::core::{Block, BlockPrior::*, Expr::*, TailExpr, Val::*};
         let mut ids = IdGen::new();
-        generate_ids!(ids => r);
+        generate_ids! { r in ids };
         let block = Block {
             priors: vec![Let(Some(r), Val(Const(U256::from(42))))],
             tail: TailExpr::Var(r),
@@ -173,7 +173,7 @@ mod tests {
     fn test_op_div() {
         use super::core::{Block, BlockPrior::*, Expr::*, TailExpr, Val::*};
         let mut ids = IdGen::new();
-        generate_ids!(ids => r);
+        generate_ids! { r in ids };
         let block = Block {
             priors: vec![Let(Some(r), Op(0x04, vec![Const(U256::from(84)), Const(U256::from(2))]))],
             tail: TailExpr::Var(r),
@@ -187,7 +187,7 @@ mod tests {
     fn test_let_val() {
         use super::core::{Block, BlockPrior::*, Expr::*, TailExpr, Val::*};
         let mut ids = IdGen::new();
-        generate_ids!(ids => x, r);
+        generate_ids! { x, r in ids };
         let block = Block {
             priors: vec![
                 Let(Some(x), Val(Const(U256::from(2)))),
@@ -204,7 +204,7 @@ mod tests {
     fn test_let_op() {
         use super::core::{Block, BlockPrior::*, Expr::*, TailExpr, Val::*};
         let mut ids = IdGen::new();
-        generate_ids!(ids => x);
+        generate_ids! { x in ids };
         let block = Block {
             priors: vec![
                 Let(Some(x), Op(0x04, vec![Const(U256::from(84)), Const(U256::from(2))])),
@@ -220,7 +220,7 @@ mod tests {
     fn test_let_op_reuse() {
         use super::core::{Block, BlockPrior::*, Expr::*, TailExpr, Val::*};
         let mut ids = IdGen::new();
-        generate_ids!(ids => x, r);
+        generate_ids! { x, r in ids };
         let block = Block {
             priors: vec![
                 Let(Some(x), Val(Const(U256::from(42)))),
@@ -237,7 +237,7 @@ mod tests {
     fn test_let_unused() {
         use super::core::{Block, BlockPrior::*, Expr::*, TailExpr, Val::*};
         let mut ids = IdGen::new();
-        generate_ids!(ids => x, y, r);
+        generate_ids! { x, y, r in ids };
         let block = Block {
             priors: vec![
                 Let(Some(x), Val(Const(U256::from(100)))),
@@ -255,7 +255,7 @@ mod tests {
     fn test_type_check_div_ok() {
         use super::ast::{Block, Expr::*, Proc, Program, Val::*};
         let mut ids = IdGen::new();
-        generate_ids!(ids => main);
+        generate_ids! { main in ids };
         let program = Program {
             procs: vec![(main, Proc {
                 args: vec![],
@@ -273,7 +273,7 @@ mod tests {
     fn test_type_check_div_err() {
         use super::ast::{Block, Expr::*, Proc, Program, Val::*};
         let mut ids = IdGen::new();
-        generate_ids!(ids => main);
+        generate_ids! { main in ids };
         let program = Program {
             procs: vec![(main, Proc {
                 args: vec![],
@@ -291,7 +291,7 @@ mod tests {
     fn test_type_check_pop_err() {
         use super::ast::{Block, BlockPrior::*, Expr::*, Proc, Program, Val::*};
         let mut ids = IdGen::new();
-        generate_ids!(ids => main, x);
+        generate_ids! { main, x in ids };
         let program = Program {
             procs: vec![(main, Proc {
                 args: vec![],

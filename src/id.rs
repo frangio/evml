@@ -20,7 +20,7 @@ impl IdGen {
 
 #[cfg(test)]
 macro_rules! generate_ids {
-    ($ids:ident => $($id:ident),+) => {
+    ($($id:ident),+ in $ids:ident) => {
         $(let $id = $ids.generate();)+
     };
 }

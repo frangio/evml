@@ -754,7 +754,7 @@ mod tests {
     #[test]
     fn test_index_trivial() {
         let mut ids = IdGen::new();
-        generate_ids!(ids => x);
+        generate_ids! { x in ids };
         let block = Block {
             priors: vec![],
             tail: TailExpr::Var(x),
@@ -771,7 +771,7 @@ mod tests {
     #[test]
     fn test_index_if_then_else_tail() {
         let mut ids = IdGen::new();
-        generate_ids!(ids => x, y, z);
+        generate_ids! { x, y, z in ids };
         let block = Block {
             priors: vec![],
             tail: TailExpr::IfThenElse(
@@ -809,8 +809,8 @@ mod tests {
     #[test]
     fn test_index_if_then_else_prior() {
         let mut ids = IdGen::new();
-        generate_ids!(ids => x, y);
-        generate_ids!(ids => t, f);
+        generate_ids! { x, y in ids };
+        generate_ids! { t, f in ids };
         let block = Block {
             priors: vec![
                 Let(Some(x), Val(Const(U256::from(1)))),
@@ -850,7 +850,7 @@ mod tests {
     #[test]
     fn test_compile_if_then_else_tail() {
         let mut ids = IdGen::new();
-        generate_ids!(ids => x, t, f);
+        generate_ids! { x, t, f in ids };
         let block = Block {
             priors: vec![
                 Let(Some(x), Val(Const(U256::from(2)))),
@@ -864,7 +864,7 @@ mod tests {
             ),
         };
         let code = compile(program(block, 1), &mut ids.clone());
-        generate_ids!(ids => label);
+        generate_ids! { label in ids };
         assert_eq!(code, vec![
             Push(U256::from(2)),
             PushLabel(label),
@@ -880,7 +880,7 @@ mod tests {
     #[test]
     fn test_compile_if_then_else_prior() {
         let mut ids = IdGen::new();
-        generate_ids!(ids => x, y, t, f);
+        generate_ids! { x, y, t, f in ids };
         let block = Block {
             priors: vec![
                 Let(Some(x), Val(Const(U256::from(2)))),
@@ -895,7 +895,7 @@ mod tests {
             tail: TailExpr::Var(y),
         };
         let code = compile(program(block, 1), &mut ids.clone());
-        generate_ids!(ids => label1, label2);
+        generate_ids! { label1, label2 in ids };
         assert_eq!(code, vec![
             Push(U256::from(2)),
             PushLabel(label2),
