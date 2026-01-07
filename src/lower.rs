@@ -16,13 +16,9 @@ pub fn lower(program: ast::Program<Id>, ids: &mut IdGen) -> core::Program {
 fn lower_block(block: ast::Block<Id>, ids: &mut IdGen) -> core::Block {
     let mut priors = Vec::with_capacity(block.priors.len());
 
-    for prior in block.priors {
-        match prior {
-            ast::BlockPrior::Let(x, expr) => {
-                let expr = lower_expr(expr, &mut priors, ids);
-                priors.push(core::BlockPrior::Let(x, expr));
-            }
-        }
+    for (x, expr) in block.priors {
+        let expr = lower_expr(expr, &mut priors, ids);
+        priors.push((x, expr));
     }
 
     let tail = lower_expr(block.tail, &mut priors, ids);
@@ -33,7 +29,7 @@ fn lower_block(block: ast::Block<Id>, ids: &mut IdGen) -> core::Block {
 
 fn lower_expr(
     expr: ast::Expr<Id>,
-    priors: &mut Vec<core::BlockPrior>,
+    priors: &mut Vec<(Option<Id>, core::Expr)>,
     ids: &mut IdGen,
 ) -> core::Expr {
     match expr {
@@ -51,7 +47,7 @@ fn lower_expr(
                 core::Expr::Val(core::Val::Var(x)) => x,
                 expr => {
                     let x = ids.generate();
-                    priors.push(core::BlockPrior::Let(Some(x), expr));
+                    priors.push((Some(x), expr));
                     x
                 }
             };
@@ -68,7 +64,7 @@ fn lower_expr(
 
 fn expr_to_tail(
     expr: core::Expr,
-    priors: &mut Vec<core::BlockPrior>,
+    priors: &mut Vec<(Option<Id>, core::Expr)>,
     ids: &mut IdGen,
 ) -> core::TailExpr {
     match expr {
@@ -77,17 +73,17 @@ fn expr_to_tail(
 
         core::Expr::Val(core::Val::Const(c)) => {
             let x = ids.generate();
-            priors.push(core::BlockPrior::Let(Some(x), core::Expr::Val(core::Val::Const(c))));
+            priors.push((Some(x), core::Expr::Val(core::Val::Const(c))));
             core::TailExpr::Var(x)
         }
 
         core::Expr::Op(op, _) => {
             if opcodes::info(op).unwrap().outputs == 0 {
-                priors.push(core::BlockPrior::Let(None, expr));
+                priors.push((None, expr));
                 core::TailExpr::Unit
             } else {
                 let x = ids.generate();
-                priors.push(core::BlockPrior::Let(Some(x), expr));
+                priors.push((Some(x), expr));
                 core::TailExpr::Var(x)
             }
         }

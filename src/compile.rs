@@ -105,17 +105,23 @@ fn compile_proc(body: core::Block, args: &[Id], stop: Option<usize>, ids: &mut I
 
     for block_id in proc.postorder().iter().skip(1).rev() {
         let block = proc.block(block_id);
+
         if let Some(label) = block.data.label {
             code.push(asm::Instr::JumpDest(label));
         }
+
         let hash_map::Entry::Occupied(mut stack_entry) = stacks.entry(block_id) else { panic!() };
         let stack = stack_entry.get_mut();
         stack.extend(block.data.input);
 
         let liveness = &analysis.liveness[block_id.index()];
-        for (i, prior) in block.priors().iter().enumerate() {
-            let is_last_use = |x| liveness.last_use(x) == InstrIdx::Prior(i);
-            compile_prior(prior, stack, is_last_use, ids, code);
+
+        for (i, (x, expr)) in block.priors().iter().enumerate() {
+            let is_last_use = |y| liveness.last_use(y) == InstrIdx::Prior(i);
+            compile_expr_onto(expr, stack, is_last_use, ids, code);
+            if x.is_some() {
+                stack.push(*x);
+            }
         }
 
         let ipdom = proc.ipdom[block_id.index()];
@@ -139,20 +145,6 @@ fn compile_proc(body: core::Block, args: &[Id], stop: Option<usize>, ids: &mut I
                 debug_assert_eq!(prev_stack, stacks[&succ]);
             }
         }
-    }
-}
-
-fn compile_prior(
-    prior: &core::BlockPrior,
-    stack: &mut Stack,
-    is_last_use: impl Fn(Id) -> bool,
-    ids: &mut IdGen,
-    code: &mut Vec<asm::Instr>,
-) {
-    let core::BlockPrior::Let(x, e) = prior;
-    compile_expr_onto(e, stack, is_last_use, ids, code);
-    if let &Some(x) = x {
-        stack.push(Some(x));
     }
 }
 
@@ -365,7 +357,7 @@ impl Idx for CfgId {
 
 struct IndexedProc {
     blocks: Box<[IndexedBlock]>,
-    segments: Box<[Box<[core::BlockPrior]>]>,
+    segments: Box<[Box<[(Option<Id>, core::Expr)]>]>,
     labeled_blocks: HashMap<Id, usize>,
     ipdom: Box<[CfgId]>,
 }
@@ -429,7 +421,7 @@ struct IndexedBlockRef<'a> {
 }
 
 impl<'a> IndexedBlockRef<'a> {
-    fn priors(&self) -> &'a [core::BlockPrior] {
+    fn priors(&self) -> &'a [(Option<Id>, core::Expr)] {
         &self.proc.segments[self.data.segment][self.data.start..self.data.end]
     }
 }
@@ -503,11 +495,11 @@ fn index(block: core::Block, stop: Option<usize>, ids: &mut IdGen) -> IndexedPro
             if let Some(rets) = stop && let TailExpr::Apply(target, args) = tail {
                 assert!(rets <= 1);
                 if rets == 0 {
-                    priors.push(BlockPrior::Let(None, Expr::Apply(target, args)));
+                    priors.push((None, Expr::Apply(target, args)));
                     tail = TailExpr::Unit;
                 } else {
                     let res = ids.generate();
-                    priors.push(BlockPrior::Let(Some(res), Expr::Apply(target, args)));
+                    priors.push((Some(res), Expr::Apply(target, args)));
                     tail = TailExpr::Var(res);
                 }
             }
@@ -537,14 +529,14 @@ fn index(block: core::Block, stop: Option<usize>, ids: &mut IdGen) -> IndexedPro
             QueueItem::Unvisited(unvisited_block) => {
                 let UnvisitedBlock { label, input, segment, start, tail, cont_label } = unvisited_block;
 
-                let split = segments[segment].iter_mut().enumerate().skip(start).find_map(|(i, p)| {
-                    matches!(p, BlockPrior::Let(_, Expr::IfThenElse(..))).then_some(i)
+                let split = segments[segment].iter_mut().enumerate().skip(start).find_map(|(i, (_, e))| {
+                    matches!(e, Expr::IfThenElse(..)).then_some(i)
                 });
 
                 let (tail, cont_label, join) = match split {
                     None => (tail, cont_label, None),
                     Some(split) => {
-                        let BlockPrior::Let(res, Expr::IfThenElse(cond, then_else)) =
+                        let (res, Expr::IfThenElse(cond, then_else)) =
                             take(&mut segments[segment][split])
                         else { unreachable!() };
 
@@ -717,7 +709,7 @@ impl Procedure for IndexedProc {
         };
 
         let prior_def_uses = priors.iter().enumerate().flat_map(|(i, prior)| {
-            let BlockPrior::Let(def, expr) = prior;
+            let (def, expr) = prior;
             let (vals, ids): (&[Val], &[Id]) = match expr {
                 Expr::Unit => (&[], &[]),
                 Expr::Val(val) => (slice::from_ref(val), &[]),
@@ -750,7 +742,7 @@ mod tests {
 
     use super::*;
     use crate::id::{IdGen, generate_ids};
-    use crate::{asm::Instr::*, core::{self, Block, BlockPrior::*, Expr::*, TailExpr, Val::*}, graph::Successors};
+    use crate::{asm::Instr::*, core::{self, Block, Expr::*, TailExpr, Val::*}, graph::Successors};
 
     fn program(main: Block, rets: usize) -> core::Program {
         core::Program { main, rets, procs: vec![] }
@@ -818,12 +810,12 @@ mod tests {
         generate_ids! { t, f in ids };
         let block = Block {
             priors: vec![
-                Let(Some(x), Val(Const(U256::from(1)))),
-                Let(Some(y), IfThenElse(
+                (Some(x), Val(Const(U256::from(1)))),
+                (Some(y), IfThenElse(
                     x,
                     Box::new([
-                        Block { priors: vec![Let(Some(t), Val(Const(U256::from(1))))], tail: TailExpr::Var(t) },
-                        Block { priors: vec![Let(Some(f), Val(Const(U256::from(0))))], tail: TailExpr::Var(f) },
+                        Block { priors: vec![(Some(t), Val(Const(U256::from(1))))], tail: TailExpr::Var(t) },
+                        Block { priors: vec![(Some(f), Val(Const(U256::from(0))))], tail: TailExpr::Var(f) },
                     ]),
                 )),
             ],
@@ -858,13 +850,13 @@ mod tests {
         generate_ids! { x, t, f in ids };
         let block = Block {
             priors: vec![
-                Let(Some(x), Val(Const(U256::from(2)))),
+                (Some(x), Val(Const(U256::from(2)))),
             ],
             tail: TailExpr::IfThenElse(
                 x,
                 Box::new([
-                    Block { priors: vec![Let(Some(t), Val(Const(U256::from(1))))], tail: TailExpr::Var(t) },
-                    Block { priors: vec![Let(Some(f), Val(Const(U256::from(0))))], tail: TailExpr::Var(f) },
+                    Block { priors: vec![(Some(t), Val(Const(U256::from(1))))], tail: TailExpr::Var(t) },
+                    Block { priors: vec![(Some(f), Val(Const(U256::from(0))))], tail: TailExpr::Var(f) },
                 ]),
             ),
         };
@@ -888,12 +880,12 @@ mod tests {
         generate_ids! { x, y, t, f in ids };
         let block = Block {
             priors: vec![
-                Let(Some(x), Val(Const(U256::from(2)))),
-                Let(Some(y), IfThenElse(
+                (Some(x), Val(Const(U256::from(2)))),
+                (Some(y), IfThenElse(
                     x,
                     Box::new([
-                        Block { priors: vec![Let(Some(t), Val(Const(U256::from(1))))], tail: TailExpr::Var(t) },
-                        Block { priors: vec![Let(Some(f), Val(Const(U256::from(0))))], tail: TailExpr::Var(f) },
+                        Block { priors: vec![(Some(t), Val(Const(U256::from(1))))], tail: TailExpr::Var(t) },
+                        Block { priors: vec![(Some(f), Val(Const(U256::from(0))))], tail: TailExpr::Var(f) },
                     ]),
                 )),
             ],

@@ -81,8 +81,7 @@ pub fn parse(source: &str) -> Result<ast::Program<&str>> {
                 .padded()
                 .then_ignore(just('='))
                 .then(expr.clone())
-                .then_ignore(just(';'))
-                .map(|(x, e)| BlockPrior::Let(x, e));
+                .then_ignore(just(';'));
 
             block_let
                 .padded()

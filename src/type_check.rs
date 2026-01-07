@@ -31,17 +31,11 @@ fn type_check_proc(proc: &ast::Proc<Id>, prog_env: &HashMap<Id, Type>) -> Result
 }
 
 fn type_check_block(block: &ast::Block<Id>, mut env: HashMap<Id, Type>) -> Result<usize> {
-    use crate::ast::*;
-    for prior in &block.priors {
-        match prior {
-            BlockPrior::Let(x, e) => {
-                let outputs = type_check_expr(e, &env)?;
-                ensure!(outputs == x.iter().count(), "void operation can't be assigned");
-                if let Some(x) = x {
-                    env.insert(*x, Type::Val);
-                }
-            }
-
+    for (x, e) in &block.priors {
+        let outputs = type_check_expr(e, &env)?;
+        ensure!(outputs == x.iter().count(), "void operation can't be assigned");
+        if let Some(x) = x {
+            env.insert(*x, Type::Val);
         }
     }
 
@@ -137,7 +131,7 @@ mod tests {
 
     #[test]
     fn test_type_check_pop_err() {
-        use super::ast::{Block, BlockPrior::*, Expr::*, Proc, Program, Val::*};
+        use super::ast::{Block, Expr::*, Proc, Program, Val::*};
         let mut ids = IdGen::new();
         generate_ids! { main, x in ids };
         let program = Program {
@@ -146,7 +140,7 @@ mod tests {
                 rets: 0,
                 body: Block {
                     priors: vec![
-                        Let(Some(x), Op(0x50, Box::new([Const(U256::from(42))]))),
+                        (Some(x), Op(0x50, Box::new([Const(U256::from(42))]))),
                     ],
                     tail: Val(Const(U256::from(0))),
                 },

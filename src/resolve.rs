@@ -44,19 +44,14 @@ fn resolve_block<'a>(
 ) -> Result<Block<Id>> {
     let mut priors = Vec::with_capacity(block.priors.len());
 
-    for prior in &block.priors {
-        match prior {
-            BlockPrior::Let(x, expr) => {
-                let expr = resolve_expr(expr, ids, &env)?;
-                let y = x.as_ref().map(|x| {
-                    let y = ids.generate();
-                    env.insert(x, y);
-                    y
-                });
-                priors.push(BlockPrior::Let(y, expr));
-            }
-
-        }
+    for (x, expr) in &block.priors {
+        let expr = resolve_expr(expr, ids, &env)?;
+        let y = x.as_ref().map(|x| {
+            let y = ids.generate();
+            env.insert(x, y);
+            y
+        });
+        priors.push((y, expr));
     }
 
     let tail = resolve_expr(&block.tail, ids, &env)?;

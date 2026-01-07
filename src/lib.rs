@@ -39,12 +39,8 @@ pub mod ast {
         IfThenElse(Box<(Expr<T>, [Block<T>; 2])>),
     }
 
-    pub enum BlockPrior<T> {
-        Let(Option<T>, Expr<T>),
-    }
-
     pub struct Block<T> {
-        pub priors: Vec<BlockPrior<T>>,
+        pub priors: Vec<(Option<T>, Expr<T>)>,
         pub tail: Expr<T>,
     }
 
@@ -86,13 +82,8 @@ pub mod core {
     }
 
     #[derive(PartialEq, Eq, Debug)]
-    pub enum BlockPrior {
-        Let(Option<Id>, Expr),
-    }
-
-    #[derive(PartialEq, Eq, Debug)]
     pub struct Block {
-        pub priors: Vec<BlockPrior>,
+        pub priors: Vec<(Option<Id>, Expr)>,
         pub tail: TailExpr,
     }
 
@@ -119,12 +110,6 @@ pub mod core {
     impl Default for Expr {
         fn default() -> Self {
             Expr::Val(Default::default())
-        }
-    }
-
-    impl Default for BlockPrior {
-        fn default() -> Self {
-            BlockPrior::Let(None, Default::default())
         }
     }
 }
