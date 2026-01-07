@@ -1,5 +1,4 @@
 use std::{cmp::Ordering, collections::HashMap, hash::Hash};
-
 use crate::graph::{EntryNode, ExitNode, Graph, Idx, NodeOrdering, Successors, cache_predecessors, idom, postorder, transpose};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

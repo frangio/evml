@@ -3,10 +3,10 @@ use std::iter::{chain, repeat_n, zip};
 use std::mem::{take};
 use std::num::NonZero;
 use std::slice;
-
 use crate::utils::exact_size_chain;
 use crate::utils::exact_size_iter::iter_some;
-use crate::{Id, IdGen, asm, core};
+use crate::{asm, core};
+use crate::id::{Id, IdGen};
 use crate::analysis::{self, Cfg, DefUse, Procedure, ipdom, liveness};
 use crate::graph::{EntryNode, ExitNode, Graph, Idx, NodeOrdering, Successors};
 
@@ -744,7 +744,8 @@ mod tests {
     use revm::primitives::U256;
 
     use super::*;
-    use crate::{IdGen, generate_ids, asm::Instr::*, core::{self, Block, BlockPrior::*, Expr::*, TailExpr, Val::*}, graph::Successors};
+    use crate::id::{IdGen, generate_ids};
+    use crate::{asm::Instr::*, core::{self, Block, BlockPrior::*, Expr::*, TailExpr, Val::*}, graph::Successors};
 
     fn program(main: Block, rets: usize) -> core::Program {
         core::Program { main, rets, procs: vec![] }

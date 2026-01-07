@@ -1,4 +1,5 @@
-use crate::{ast, core, opcodes, Id, IdGen};
+use crate::{ast, core, opcodes};
+use crate::id::{Id, IdGen};
 
 pub fn lower(program: ast::Program<Id>, ids: &mut IdGen) -> core::Program {
     let mut procs_iter = program.procs.into_iter();

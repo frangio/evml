@@ -1,5 +1,4 @@
 use std::{mem::replace, num::NonZero};
-
 use crate::utils::{BitSet, ShiftStack};
 
 pub trait Idx: Copy + Eq {
