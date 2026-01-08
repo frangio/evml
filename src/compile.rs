@@ -159,11 +159,11 @@ fn compile_cont(
     use core::*;
     use asm::*;
 
-    let stash_start = stack.len() - ipdom_liveness.live_in_size();
-    let mut next_avail = stash_start;
+    let scratch_end = stack.len() - ipdom_liveness.live_in_size();
+    let mut next_non_scratch = scratch_end;
     let mut popped = 0;
 
-    for d in 0..stash_start {
+    for d in 0..scratch_end {
         let d = d - popped;
         let x = stack.read(d);
         if liveness.last_use(x) < InstrIdx::Cont {
@@ -174,13 +174,13 @@ fn compile_cont(
             code.push(Instr::Pop);
             stack.popn(1);
             popped += 1;
-            next_avail -= 1;
+            next_non_scratch -= 1;
         } else if ipdom_liveness.live_in(x) {
-            let e = (next_avail..stack.len()).find(|&e| {
+            let e = (next_non_scratch..stack.len()).find(|&e| {
                 let y = stack.read(e);
                 !ipdom_liveness.live_in(y)
             }).unwrap();
-            next_avail = e + 1;
+            next_non_scratch = e + 1;
             if d > 0 {
                 code.push(Instr::Swap(d));
                 stack.swap(d);
