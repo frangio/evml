@@ -146,11 +146,19 @@ mod tests {
 
     impl<V> TestProcedure<V> {
         fn new(
-            start: usize,
             edges: &[(usize, usize)],
             instructions: &[(usize, &'static [&'static [(DefUse, V)]])],
         ) -> Self {
-            let cfg = TestGraph::new(start, edges);
+            let node_count = edges.iter().flat_map(|&(v, w)| [v, w]).max().map_or(0, |c| c + 1);
+            Self::with_nodes(node_count, edges, instructions)
+        }
+
+        fn with_nodes(
+            node_count: usize,
+            edges: &[(usize, usize)],
+            instructions: &[(usize, &'static [&'static [(DefUse, V)]])],
+        ) -> Self {
+            let cfg = TestGraph::with_nodes(node_count, edges);
             let instructions = instructions.iter().copied().collect();
             Self { cfg, instructions }
         }
@@ -180,10 +188,10 @@ mod tests {
     #[test]
     fn test_liveness_single_block() {
         // 0: def x; use x
-        let proc = TestProcedure::new(0, &[], &[
+        let proc = TestProcedure::with_nodes(1, &[], &[
             (0, instructions! { def ["x"]; use ["x"] }),
         ]);
-        let result = liveness(&proc, &proc.cfg.postorder);
+        let result = liveness(&proc, proc.cfg.postorder());
         let a = &result[0];
         assert!(!a.live_in("x"));
         assert_eq!(a.last_use("x"), VarUse::Instr(1));
@@ -192,11 +200,11 @@ mod tests {
     #[test]
     fn test_liveness_linear() {
         // 0: def x; def y; use x  →  1: use y
-        let proc = TestProcedure::new(0, &[(0, 1)], &[
+        let proc = TestProcedure::new(&[(0, 1)], &[
             (0, instructions! { def ["x"]; def ["y"]; use ["x"] }),
             (1, instructions! { use ["y"] }),
         ]);
-        let result = liveness(&proc, &proc.cfg.postorder);
+        let result = liveness(&proc, proc.cfg.postorder());
         let a = &result[0];
         assert!(!a.live_in("x"));
         assert_eq!(a.last_use("x"), VarUse::Instr(2));
@@ -214,14 +222,14 @@ mod tests {
         //   1   2
         //    \ /
         //     3: use x
-        let proc = TestProcedure::new(0, &[
+        let proc = TestProcedure::new(&[
             (0, 1), (0, 2),
             (1, 3), (2, 3),
         ], &[
             (0, instructions! { def ["x"] }),
             (3, instructions! { use ["x"] }),
         ]);
-        let result = liveness(&proc, &proc.cfg.postorder);
+        let result = liveness(&proc, proc.cfg.postorder());
         assert!(!result[0].live_in("x"));
         assert_eq!(result[0].last_use("x"), VarUse::LiveOut);
         assert!(result[1].live_in("x"));
@@ -235,11 +243,11 @@ mod tests {
     #[test]
     fn test_liveness_def_kills() {
         // 0  →  1: def x  →  2: use x
-        let proc = TestProcedure::new(0, &[(0, 1), (1, 2)], &[
+        let proc = TestProcedure::new(&[(0, 1), (1, 2)], &[
             (1, instructions! { def ["x"] }),
             (2, instructions! { use ["x"] }),
         ]);
-        let result = liveness(&proc, &proc.cfg.postorder);
+        let result = liveness(&proc, proc.cfg.postorder());
         assert_eq!(result[0].live_in_size(), 0);
         assert!(!result[1].live_in("x"));
         assert_eq!(result[1].last_use("x"), VarUse::LiveOut);
@@ -250,10 +258,10 @@ mod tests {
     #[test]
     fn test_liveness_local() {
         // 0: def x; use x
-        let proc = TestProcedure::new(0, &[], &[
+        let proc = TestProcedure::with_nodes(1, &[], &[
             (0, instructions! { def ["x"] ; use ["x"] }),
         ]);
-        let result = liveness(&proc, &proc.cfg.postorder);
+        let result = liveness(&proc, proc.cfg.postorder());
         assert!(!result[0].live_in("x"));
         assert_eq!(result[0].last_use("x"), VarUse::Instr(1));
     }
@@ -261,11 +269,11 @@ mod tests {
     #[test]
     fn test_liveness_last_use() {
         // 0: def x  →  1: use x  →  2
-        let proc = TestProcedure::new(0, &[(0, 1), (1, 2)], &[
+        let proc = TestProcedure::new(&[(0, 1), (1, 2)], &[
             (0, instructions! { def ["x"] }),
             (1, instructions! { use ["x"] }),
         ]);
-        let result = liveness(&proc, &proc.cfg.postorder);
+        let result = liveness(&proc, proc.cfg.postorder());
         assert!(!result[0].live_in("x"));
         assert_eq!(result[0].last_use("x"), VarUse::LiveOut);
         assert!(result[1].live_in("x"));
@@ -276,10 +284,10 @@ mod tests {
     #[test]
     fn test_liveness_multiple_uses() {
         // 0: def x; use x; use x
-        let proc = TestProcedure::new(0, &[], &[
+        let proc = TestProcedure::with_nodes(1, &[], &[
             (0, instructions! { def ["x"]; use ["x"]; use ["x"] }),
         ]);
-        let result = liveness(&proc, &proc.cfg.postorder);
+        let result = liveness(&proc, proc.cfg.postorder());
         assert!(!result[0].live_in("x"));
         assert_eq!(result[0].last_use("x"), VarUse::Instr(2));
     }

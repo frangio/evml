@@ -297,28 +297,29 @@ pub fn postorder<G: EntryNode + Successors>(g: G) -> ArrayNodeOrdering<G::Node> 
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use std::iter::chain;
+    use std::cell::OnceCell;
 
     pub struct TestGraph {
         pub node_count: usize,
         pub edges: Vec<(usize, usize)>,
-        pub postorder: ArrayNodeOrdering<usize>,
+        entry: OnceCell<usize>,
+        exit: OnceCell<usize>,
+        postorder: OnceCell<ArrayNodeOrdering<usize>>,
     }
 
     impl TestGraph {
-        pub fn new(start: usize, edges: &[(usize, usize)]) -> Self {
-            let node_count = chain(
-                [start],
-                edges.iter().flat_map(|&(v, w)| [v, w]),
-            ).max().map_or(0, |c| c + 1);
+        pub fn new(edges: &[(usize, usize)]) -> Self {
+            let node_count = edges.iter().flat_map(|&(v, w)| [v, w]).max().map_or(0, |c| c + 1);
+            Self::with_nodes(node_count, edges)
+        }
+
+        pub fn with_nodes(node_count: usize, edges: &[(usize, usize)]) -> Self {
             let edges = edges.to_vec();
-            let mut graph = Self {
-                node_count,
-                edges,
-                postorder: ArrayNodeOrdering::new(vec![start].into_boxed_slice()),
-            };
-            graph.postorder = postorder(&graph);
-            graph
+            Self { node_count, edges, entry: OnceCell::new(), exit: OnceCell::new(), postorder: OnceCell::new() }
+        }
+
+        pub fn postorder(&self) -> &ArrayNodeOrdering<usize> {
+            self.postorder.get_or_init(|| postorder(self))
         }
     }
 
@@ -330,7 +331,7 @@ pub mod tests {
         }
 
         fn nodes(&self) -> impl Iterator<Item = Self::Node> {
-            self.postorder.iter()
+            0..self.node_count
         }
     }
 
@@ -342,13 +343,23 @@ pub mod tests {
 
     impl EntryNode for TestGraph {
         fn entry(&self) -> usize {
-            self.postorder.node_at(self.postorder.iter().len() - 1)
+            *self.entry.get_or_init(|| {
+                let mut entries = (0..self.node_count).filter(|&n| self.predecessors(n).next().is_none());
+                let entry = entries.next().expect("no entry node found");
+                assert!(entries.next().is_none(), "multiple entry nodes found");
+                entry
+            })
         }
     }
 
     impl ExitNode for TestGraph {
         fn exit(&self) -> usize {
-            self.postorder.node_at(0)
+            *self.exit.get_or_init(|| {
+                let mut exits = (0..self.node_count).filter(|&n| self.successors(n).next().is_none());
+                let exit = exits.next().expect("no exit node found");
+                assert!(exits.next().is_none(), "multiple exit nodes found");
+                exit
+            })
         }
     }
 
@@ -363,7 +374,7 @@ pub mod tests {
         // 0 → 1 → 2
         //     ↓
         //     3
-        let g = TestGraph::new(0, &[
+        let g = TestGraph::new(&[
             (0, 1),
             (1, 2),
             (1, 3),
@@ -384,19 +395,19 @@ pub mod tests {
     #[test]
     fn test_idom_single_node() {
         // 0
-        let g = TestGraph::new(0, &[]);
-        let result = idom(&g, &g.postorder);
+        let g = TestGraph::with_nodes(1, &[]);
+        let result = idom(&g, g.postorder());
         assert_eq!(result[0], 0);
     }
 
     #[test]
     fn test_idom_linear() {
         // 0 → 1 → 2
-        let g = TestGraph::new(0, &[
+        let g = TestGraph::new(&[
             (0, 1),
             (1, 2),
         ]);
-        let result = idom(&g, &g.postorder);
+        let result = idom(&g, g.postorder());
         assert_eq!(result[0], 0);
         assert_eq!(result[1], 0);
         assert_eq!(result[2], 1);
@@ -409,13 +420,13 @@ pub mod tests {
         // 1   2
         //  ↘ ↙
         //   3
-        let g = TestGraph::new(0, &[
+        let g = TestGraph::new(&[
             (0, 1),
             (0, 2),
             (1, 3),
             (2, 3),
         ]);
-        let result = idom(&g, &g.postorder);
+        let result = idom(&g, g.postorder());
         assert_eq!(result[0], 0);
         assert_eq!(result[1], 0);
         assert_eq!(result[2], 0);
@@ -427,12 +438,12 @@ pub mod tests {
         // 0 → 1 → 2
         //     ↑   ↓
         //     └───┘
-        let g = TestGraph::new(0, &[
+        let g = TestGraph::new(&[
             (0, 1),
             (1, 2),
             (2, 1),
         ]);
-        let result = idom(&g, &g.postorder);
+        let result = idom(&g, g.postorder());
         assert_eq!(result[0], 0);
         assert_eq!(result[1], 0);
         assert_eq!(result[2], 1);
@@ -444,14 +455,14 @@ pub mod tests {
         //     ↑   ↑   ↓
         //     │   └───┘
         //     └───────┘
-        let g = TestGraph::new(0, &[
+        let g = TestGraph::new(&[
             (0, 1),
             (1, 2),
             (2, 3),
             (3, 2),
             (3, 1),
         ]);
-        let result = idom(&g, &g.postorder);
+        let result = idom(&g, g.postorder());
         assert_eq!(result[0], 0);
         assert_eq!(result[1], 0);
         assert_eq!(result[2], 1);
@@ -463,13 +474,13 @@ pub mod tests {
         //   0
         //  ↙ ↘
         // 1 ↔ 2
-        let g = TestGraph::new(0, &[
+        let g = TestGraph::new(&[
             (0, 1),
             (0, 2),
             (1, 2),
             (2, 1),
         ]);
-        let result = idom(&g, &g.postorder);
+        let result = idom(&g, g.postorder());
         assert_eq!(result[0], 0);
         assert_eq!(result[1], 0);
         assert_eq!(result[2], 0);
