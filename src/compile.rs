@@ -106,38 +106,22 @@ fn compile_proc(body: core::Block, args: &[Id], stop: Option<usize>, ids: &mut I
     for block_id in proc.postorder().iter().skip(1).rev() {
         let block = proc.block(block_id);
 
-        if let Some(label) = block.data.label {
-            code.push(asm::Instr::JumpDest(label));
-        }
-
         let hash_map::Entry::Occupied(mut stack_entry) = stacks.entry(block_id) else { panic!() };
         let stack = stack_entry.get_mut();
-        stack.extend(block.data.input);
 
-        let liveness = &analysis.liveness[block_id.index()];
-
-        for (i, (x, expr)) in block.priors().iter().enumerate() {
-            let is_last_use = |y| liveness.last_use(y) == InstrIdx::Prior(i);
-            compile_expr_onto(expr, stack, is_last_use, ids, code);
-            if x.is_some() {
-                stack.push(*x);
-            }
-        }
-
-        let ipdom = proc.ipdom[block_id.index()];
-        let ipdom_liveness = &analysis.liveness[ipdom.index()];
-
-        compile_cont(
-            &block.data.cont,
+        compile_block(
+            block,
             stack,
-            liveness,
-            ipdom_liveness,
-            proc.fallthrough(block_id).and_then(|i| proc.blocks[i.index()].label),
+            analysis.liveness(block_id),
+            analysis.liveness(proc.ipdom(block_id)),
+            proc.fallthrough(block_id).and_then(|i| proc.label(i)),
+            ids,
             code,
         );
 
-        let (_, stack) = stack_entry.remove_entry();
         let succs = proc.successor_blocks(block_id);
+
+        let (_, stack) = stack_entry.remove_entry();
         let stack = repeat_n(stack, succs.len());
         for (succ, stack) in zip(succs, stack) {
             let prev_stack = stacks.insert(succ, stack);
@@ -148,12 +132,45 @@ fn compile_proc(body: core::Block, args: &[Id], stop: Option<usize>, ids: &mut I
     }
 }
 
+fn compile_block(
+    block: IndexedBlockRef,
+    stack: &mut Stack,
+    liveness: &BlockLiveness,
+    ipdom_liveness: &BlockLiveness,
+    fallthrough_label: Option<Id>,
+    ids: &mut IdGen,
+    code: &mut Vec<asm::Instr>,
+) {
+    stack.extend(block.data.input);
+
+    if let Some(label) = block.data.label {
+        code.push(asm::Instr::JumpDest(label));
+    }
+
+    for (i, (x, expr)) in block.priors().iter().enumerate() {
+        let is_last_use = |y| liveness.last_use(y) == InstrIdx::Prior(i);
+        compile_expr_onto(expr, stack, is_last_use, ids, code);
+        if x.is_some() {
+            stack.push(*x);
+        }
+    }
+
+    compile_cont(
+        &block.data.cont,
+        stack,
+        liveness,
+        ipdom_liveness,
+        fallthrough_label,
+        code,
+    );
+}
+
 fn compile_cont(
     cont: &Cont,
     stack: &mut Stack,
     liveness: &BlockLiveness,
     ipdom_liveness: &BlockLiveness,
-    fallthrough_target: Option<Id>,
+    fallthrough_label: Option<Id>,
     code: &mut Vec<asm::Instr>,
 ) {
     use core::*;
@@ -209,7 +226,7 @@ fn compile_cont(
             compile_args_onto(args, None, stack, should_swap, code);
             stack.popn(args.len());
 
-            if Some(target) != fallthrough_target {
+            if Some(target) != fallthrough_label {
                 code.push(Instr::PushLabel(target));
                 code.push(Instr::Jump);
             }
@@ -333,13 +350,19 @@ fn compile_val_onto(
 
 type BlockLiveness = analysis::BlockLiveness<IndexedProc>;
 
+fn analyze(proc: &IndexedProc) -> Analysis {
+    let liveness = liveness(proc, &proc.postorder());
+    Analysis { liveness }
+}
+
 struct Analysis {
     liveness: Box<[BlockLiveness]>,
 }
 
-fn analyze(proc: &IndexedProc) -> Analysis {
-    let liveness = liveness(proc, &proc.postorder());
-    Analysis { liveness }
+impl Analysis {
+    fn liveness(&self, block_id: CfgId) -> &BlockLiveness {
+        &self.liveness[block_id.index()]
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -385,16 +408,31 @@ impl IndexedProc {
         IndexedBlockRef { proc: self, data: &self.blocks[block_id.index()] }
     }
 
+    fn label(&self, block_id: CfgId) -> Option<Id> {
+        self.blocks[block_id.index()].label
+    }
+
     fn fallthrough(&self, block_id: CfgId) -> Option<CfgId> {
         assert!(block_id != self.exit());
         block_id.index().checked_sub(1).map(CfgId::new)
     }
 
+    fn ipdom(&self, block_id: CfgId) -> CfgId {
+        self.ipdom[block_id.index()]
+    }
+
     fn successor_blocks(&self, block_id: CfgId) -> impl ExactSizeIterator<Item = CfgId> {
         let (target, fallthrough) = match &self.block(block_id).data.cont {
             Cont::Stop(_) | Cont::Ret(_) => (None, None),
-            Cont::Jump(target, _) => (self.labeled_blocks.get(target).map(|&i| CfgId::new(i)), None),
-            Cont::JumpIf { then, .. } => (Some(CfgId::new(self.labeled_blocks[then])), Some(self.fallthrough(block_id).unwrap())),
+            Cont::Jump(target, _) => (
+                // Target may be another procedure if this is a tail call
+                self.labeled_blocks.get(target).map(|&i| CfgId::new(i)),
+                None,
+            ),
+            Cont::JumpIf { then, .. } => (
+                Some(CfgId::new(self.labeled_blocks[then])),
+                Some(self.fallthrough(block_id).unwrap()),
+            ),
         };
         exact_size_chain(target, fallthrough)
     }
