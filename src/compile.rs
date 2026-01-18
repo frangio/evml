@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque, hash_map};
+use std::collections::{HashMap, VecDeque};
 use std::iter::{chain, repeat_n, zip};
 use std::mem::{take};
 use std::num::NonZero;
@@ -9,79 +9,9 @@ use crate::{asm, core};
 use crate::id::{Id, IdGen};
 use crate::analysis::{self, Cfg, DefUse, Procedure, ipdom, liveness};
 use crate::graph::{EntryNode, ExitNode, Graph, Idx, NodeOrdering, Successors};
+use crate::stack;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Stack(Vec<Option<Id>>);
-struct StackEntry<'a> {
-    stack: &'a mut Stack,
-    index: usize,
-}
-
-impl Stack {
-    fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    fn popn(&mut self, count: usize) {
-        self.0.truncate(self.0.len() - count);
-    }
-
-    fn push(&mut self, x: Option<Id>) {
-        self.0.push(x);
-    }
-
-    fn swap(&mut self, depth: usize) {
-        let top = self.0.len() - 1;
-        let index = top - depth;
-        self.0.swap(index, top);
-    }
-
-    fn read(&self, depth: usize) -> Id {
-        let top = self.0.len() - 1;
-        let index = top - depth;
-        self.0[index].unwrap()
-    }
-
-    fn entry(&mut self, x: Id) -> StackEntry<'_> {
-        let index = self.0.iter()
-            .rposition(|y| y.as_ref().is_some_and(|&y| y == x))
-            .expect("unknown variable");
-        StackEntry { stack: self, index }
-    }
-}
-
-impl Default for Stack {
-    fn default() -> Self {
-        Self(Vec::new())
-    }
-}
-
-impl FromIterator<Id> for Stack {
-    fn from_iter<T: IntoIterator<Item = Id>>(iter: T) -> Self {
-        Stack(iter.into_iter().map(Some).collect())
-    }
-}
-
-impl Extend<Id> for Stack {
-    fn extend<T: IntoIterator<Item = Id>>(&mut self, iter: T) {
-        self.0.extend(iter.into_iter().map(Some))
-    }
-}
-
-impl StackEntry<'_> {
-    fn var(&self) -> Id {
-        self.stack.0[self.index].expect("stack item is temporary")
-    }
-
-    fn depth(&self) -> usize {
-        self.stack.0.len() - 1 - self.index
-    }
-
-    fn swap(&mut self) {
-        let top = self.stack.0.len() - 1;
-        self.stack.0.swap(self.index, top);
-    }
-}
+type Stack = stack::Stack<CfgId>;
 
 pub fn compile(program: core::Program, ids: &mut IdGen) -> Vec<asm::Instr> {
     let mut code = vec![];
@@ -100,36 +30,48 @@ fn compile_proc(body: core::Block, args: &[Id], stop: Option<usize>, ids: &mut I
     let proc = index(body, stop, ids);
     let analysis = analyze(&proc);
 
-    let mut stacks = HashMap::<_, Stack>::new();
-    stacks.insert(proc.entry(), args.iter().copied().collect());
+    let mut stack = Stack::new();
+    stack.extend(args.iter().copied());
+
+    let mut stacks: Box<[Box<[Id]>]> = vec![Box::default(); proc.blocks.len()].into_boxed_slice();
 
     for block_id in proc.postorder().iter().skip(1).rev() {
         let block = proc.block(block_id);
 
-        let hash_map::Entry::Occupied(mut stack_entry) = stacks.entry(block_id) else { panic!() };
-        let stack = stack_entry.get_mut();
+        if stack.top_base() == Some(block_id) {
+            stack.pop_base();
+            assert!(stacks[block_id.index()].is_empty());
+        } else {
+            stack.extend(take(&mut stacks[block_id.index()]))
+        }
+
+        let ipdom = proc.ipdom(block_id);
+        let ipdom_liveness = analysis.liveness(ipdom);
 
         compile_block(
             block,
-            stack,
+            &mut stack,
             analysis.liveness(block_id),
-            analysis.liveness(proc.ipdom(block_id)),
+            ipdom_liveness,
             proc.fallthrough(block_id).and_then(|i| proc.label(i)),
             ids,
             code,
         );
 
-        let succs = proc.successor_blocks(block_id);
+        if stack.top_base() != Some(ipdom) && ipdom != proc.exit() {
+            let new_base_len = ipdom_liveness.live_in_size() - stack.len_base();
+            stack.push_base(ipdom, new_base_len);
+        }
 
-        let (_, stack) = stack_entry.remove_entry();
-        let stack = repeat_n(stack, succs.len());
-        for (succ, stack) in zip(succs, stack) {
-            let prev_stack = stacks.insert(succ, stack);
-            if let Some(prev_stack) = prev_stack {
-                debug_assert_eq!(prev_stack, stacks[&succ]);
-            }
+        let succ_scratch = stack.drain_scratch().collect();
+        let succs = proc.successor_blocks(block_id);
+        let succs_scratch = repeat_n(succ_scratch, succs.len());
+        for (succ, succ_scratch) in zip(succs, succs_scratch) {
+            stacks[succ.index()] = succ_scratch;
         }
     }
+
+    assert!(stack.top_base().is_none());
 }
 
 fn compile_block(
@@ -233,7 +175,7 @@ fn compile_cont(
         }
 
         Cont::JumpIf { cond, then } => {
-            compile_val_onto(&Val::Var(cond), stack, |e: &StackEntry| should_swap(e.var()), code);
+            compile_val_onto(&Val::Var(cond), stack, should_swap, code);
             code.push(Instr::PushLabel(then));
             code.push(Instr::JumpIf);
         }
@@ -251,18 +193,18 @@ fn compile_expr_onto(
     use asm::*;
     match expr {
         Expr::Val(val) => {
-            compile_val_onto(val, stack, |e| is_last_use(e.var()), code);
+            compile_val_onto(val, stack, is_last_use, code);
         }
 
         Expr::Op(op, args) => {
-            compile_args_onto(args, None, stack, &is_last_use, code);
+            compile_args_onto(args, None, stack, is_last_use, code);
             code.push(Instr::Op(*op));
             stack.popn(args.len());
         }
 
         Expr::Apply(target, args) => {
             let ret = ids.generate();
-            compile_args_onto(args, Some(ret), stack, &is_last_use, code);
+            compile_args_onto(args, Some(ret), stack, is_last_use, code);
             code.push(Instr::PushLabel(*target));
             code.push(Instr::Jump);
             code.push(Instr::JumpDest(ret));
@@ -307,7 +249,7 @@ fn compile_args_onto(
     let target_stack_len = stack.len() + stack_delta;
 
     for (i, v) in args.iter().enumerate().rev() {
-        let should_swap = |e: &StackEntry| should_swap(e.var(), i);
+        let should_swap = |x: Id| should_swap(x, i);
         compile_val_onto(v, stack, should_swap, code);
         stack.push(None);
         let rem_delta = target_stack_len - stack.len();
@@ -322,23 +264,22 @@ fn compile_args_onto(
 fn compile_val_onto(
     val: &core::Val,
     stack: &mut Stack,
-    should_swap: impl Fn(&StackEntry) -> bool,
+    should_swap: impl Fn(Id) -> bool,
     code: &mut Vec<asm::Instr>,
 ) {
     use core::*;
     use asm::*;
-    match val {
+    match *val {
         Val::Const(c) => {
-            code.push(Instr::Push(*c));
+            code.push(Instr::Push(c));
         }
 
         Val::Var(x) => {
-            let mut entry = stack.entry(*x);
-            let depth = entry.depth();
-            if should_swap(&entry) {
+            let depth = stack.depth(x);
+            if should_swap(x) {
                 if depth > 0 {
                     code.push(Instr::Swap(depth));
-                    entry.swap();
+                    stack.swap(depth);
                 }
                 stack.popn(1);
             } else {
@@ -941,6 +882,64 @@ mod tests {
             JumpDest(label2),
             Push(U256::from(1)),
             JumpDest(label1),
+            Stop,
+        ]);
+    }
+
+    #[test]
+    fn test_compile_if_nested() {
+        let mut ids = IdGen::new();
+        generate_ids! { x, y, a, b, c in ids };
+        let block = Block {
+            priors: vec![
+                (Some(x), Val(Const(U256::from(1)))),
+                (Some(y), Val(Const(U256::from(0)))),
+            ],
+            tail: TailExpr::IfThenElse(
+                x,
+                Box::new([
+                    Block {
+                        priors: vec![],
+                        tail: TailExpr::IfThenElse(
+                            y,
+                            Box::new([
+                                Block {
+                                    priors: vec![(Some(a), Val(Const(U256::from(1))))],
+                                    tail: TailExpr::Var(a),
+                                },
+                                Block {
+                                    priors: vec![(Some(b), Val(Const(U256::from(2))))],
+                                    tail: TailExpr::Var(b),
+                                },
+                            ]),
+                        ),
+                    },
+                    Block {
+                        priors: vec![(Some(c), Val(Const(U256::from(3))))],
+                        tail: TailExpr::Var(c),
+                    },
+                ]),
+            ),
+        };
+        let code = compile(program(block, 1), &mut ids.clone());
+        generate_ids! { label1, label2 in ids };
+        assert_eq!(code, vec![
+            Push(U256::from(1)),
+            Push(U256::from(0)),
+            Swap(1),
+            PushLabel(label1),
+            JumpIf,
+            Push(U256::from(3)),
+            Swap(1),
+            Pop,
+            Stop,
+            JumpDest(label1),
+            PushLabel(label2),
+            JumpIf,
+            Push(U256::from(2)),
+            Stop,
+            JumpDest(label2),
+            Push(U256::from(1)),
             Stop,
         ]);
     }

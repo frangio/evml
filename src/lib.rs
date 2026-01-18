@@ -8,6 +8,7 @@ mod type_check;
 mod lower;
 mod compile;
 mod assemble;
+mod stack;
 mod utils;
 mod id;
 
@@ -286,12 +287,17 @@ mod tests {
 
     #[test]
     fn test_e2e_if_nested() {
-        assert_e2e_result(U256::from(3), r#"
+        assert_e2e_result(U256::from(11), r#"
             fn main() -> u256 {
-                if 1 {
-                    if 0 { 1 } else { 3 }
+                let a = 1;
+                let b = 0;
+                let c = 10;
+                let d = 11;
+                let e = 12;
+                if a {
+                    if b { c } else { d }
                 } else {
-                    2
+                    e
                 }
             }
         "#);
