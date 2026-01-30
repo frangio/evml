@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::iter::{chain, repeat_n, zip};
-use std::mem::{take};
+use std::mem::{replace, take};
 use std::num::NonZero;
 use std::slice;
 use crate::utils::exact_size_chain;
@@ -26,8 +26,8 @@ pub fn compile(program: core::Program, ids: &mut IdGen) -> Vec<asm::Instr> {
     code
 }
 
-fn compile_proc(body: core::Block, args: &[Id], stop: Option<usize>, ids: &mut IdGen, code: &mut Vec<asm::Instr>) {
-    let proc = index(body, stop, ids);
+fn compile_proc(proc_body: core::Block, args: &[Id], stop: Option<usize>, ids: &mut IdGen, code: &mut Vec<asm::Instr>) {
+    let proc = build_cfg(proc_body, stop, ids);
     let analysis = analyze(&proc);
 
     let mut stack = Stack::new();
@@ -45,7 +45,7 @@ fn compile_proc(body: core::Block, args: &[Id], stop: Option<usize>, ids: &mut I
             stack.extend(take(&mut stacks[block_id.index()]))
         }
 
-        let ipdom = proc.ipdom(block_id);
+        let ipdom = analysis.ipdom(block_id);
         let ipdom_liveness = analysis.liveness(ipdom);
 
         compile_block(
@@ -75,7 +75,7 @@ fn compile_proc(body: core::Block, args: &[Id], stop: Option<usize>, ids: &mut I
 }
 
 fn compile_block(
-    block: IndexedBlockRef,
+    block: BasicBlockRef,
     stack: &mut Stack,
     liveness: &BlockLiveness,
     ipdom_liveness: &BlockLiveness,
@@ -289,20 +289,26 @@ fn compile_val_onto(
     }
 }
 
-type BlockLiveness = analysis::BlockLiveness<IndexedProc>;
+type BlockLiveness = analysis::BlockLiveness<ProcCfg>;
 
-fn analyze(proc: &IndexedProc) -> Analysis {
+fn analyze(proc: &ProcCfg) -> ProcAnalysis {
     let liveness = liveness(proc, &proc.postorder());
-    Analysis { liveness }
+    let ipdom = ipdom(proc);
+    ProcAnalysis { liveness, ipdom }
 }
 
-struct Analysis {
+struct ProcAnalysis {
     liveness: Box<[BlockLiveness]>,
+    ipdom: Box<[CfgId]>,
 }
 
-impl Analysis {
+impl ProcAnalysis {
     fn liveness(&self, block_id: CfgId) -> &BlockLiveness {
         &self.liveness[block_id.index()]
+    }
+
+    fn ipdom(&self, block_id: CfgId) -> CfgId {
+        self.ipdom[block_id.index()]
     }
 }
 
@@ -319,15 +325,14 @@ impl Idx for CfgId {
     }
 }
 
-struct IndexedProc {
-    blocks: Box<[IndexedBlock]>,
+struct ProcCfg {
+    blocks: Box<[BasicBlock]>,
     segments: Box<[Box<[(Option<Id>, core::Expr)]>]>,
     labeled_blocks: HashMap<Id, usize>,
-    ipdom: Box<[CfgId]>,
 }
 
 #[derive(PartialEq, Eq, Debug)]
-struct IndexedBlock {
+struct BasicBlock {
     label: Option<Id>,
     input: Option<Id>,
     segment: usize,
@@ -344,9 +349,9 @@ enum Cont {
     JumpIf { cond: Id, then: Id },
 }
 
-impl IndexedProc {
-    fn block(&self, block_id: CfgId) -> IndexedBlockRef<'_> {
-        IndexedBlockRef { proc: self, data: &self.blocks[block_id.index()] }
+impl ProcCfg {
+    fn block(&self, block_id: CfgId) -> BasicBlockRef<'_> {
+        BasicBlockRef { proc: self, data: &self.blocks[block_id.index()] }
     }
 
     fn label(&self, block_id: CfgId) -> Option<Id> {
@@ -356,10 +361,6 @@ impl IndexedProc {
     fn fallthrough(&self, block_id: CfgId) -> Option<CfgId> {
         assert!(block_id != self.exit());
         block_id.index().checked_sub(1).map(CfgId::new)
-    }
-
-    fn ipdom(&self, block_id: CfgId) -> CfgId {
-        self.ipdom[block_id.index()]
     }
 
     fn successor_blocks(&self, block_id: CfgId) -> impl ExactSizeIterator<Item = CfgId> {
@@ -394,12 +395,12 @@ impl IndexedProc {
     }
 }
 
-struct IndexedBlockRef<'a> {
-    proc: &'a IndexedProc,
-    data: &'a IndexedBlock,
+struct BasicBlockRef<'a> {
+    proc: &'a ProcCfg,
+    data: &'a BasicBlock,
 }
 
-impl<'a> IndexedBlockRef<'a> {
+impl<'a> BasicBlockRef<'a> {
     fn priors(&self) -> &'a [(Option<Id>, core::Expr)] {
         &self.proc.segments[self.data.segment][self.data.start..self.data.end]
     }
@@ -438,22 +439,76 @@ impl NodeOrdering<CfgId> for IndexedProcPostorder {
     }
 }
 
-fn index(block: core::Block, stop: Option<usize>, ids: &mut IdGen) -> IndexedProc {
+fn normalize_tail(block: core::Block, stop: Option<usize>, ids: &mut IdGen) -> (Vec<(Option<Id>, core::Expr)>, core::TailExpr) {
+    use core::{Block, Expr, TailExpr};
+
+    let Block { mut priors, mut tail } = block;
+    if let Some(rets) = stop && let TailExpr::Apply(target, args) = tail {
+        assert!(rets <= 1);
+        if rets == 0 {
+            priors.push((None, Expr::Apply(target, args)));
+            tail = TailExpr::Unit;
+        } else {
+            let res = ids.generate();
+            priors.push((Some(res), Expr::Apply(target, args)));
+            tail = TailExpr::Var(res);
+        }
+    }
+    (priors, tail)
+}
+
+struct BasicBlockCandidate {
+    label: Option<Id>,
+    input: Option<Id>,
+    segment: usize,
+    start: usize,
+    tail: core::TailExpr,
+    cont_label: Option<Id>,
+}
+
+impl BasicBlockCandidate {
+    fn split_at_control(
+        &mut self,
+        segments: &mut [Box<[(Option<Id>, core::Expr)]>],
+        ids: &mut IdGen,
+    ) -> Option<(usize, BasicBlockCandidate)> {
+        use core::{Expr, TailExpr};
+
+        let split = segments[self.segment]
+            .iter_mut()
+            .enumerate()
+            .skip(self.start)
+            .find_map(|(i, (_, e))| matches!(e, Expr::IfThenElse(..)).then_some(i))?;
+
+        let (split_output, Expr::IfThenElse(cond, then_else)) =
+            take(&mut segments[self.segment][split])
+        else { unreachable!() };
+
+        let cont_label = self.cont_label;
+
+        let join_label = Some(ids.generate());
+        self.cont_label = join_label;
+
+        let tail = replace(&mut self.tail, TailExpr::IfThenElse(cond, then_else));
+
+        Some((split, BasicBlockCandidate {
+            label: join_label,
+            input: split_output,
+            segment: self.segment,
+            start: split + 1,
+            tail,
+            cont_label,
+        }))
+    }
+}
+
+fn build_cfg(proc_body: core::Block, stop: Option<usize>, ids: &mut IdGen) -> ProcCfg {
     use core::*;
 
     enum QueueItem {
-        Finished(IndexedBlock),
-        Discovered(IndexedBlock),
-        Unvisited(UnvisitedBlock),
-    }
-
-    struct UnvisitedBlock {
-        label: Option<Id>,
-        input: Option<Id>,
-        segment: usize,
-        start: usize,
-        tail: TailExpr,
-        cont_label: Option<Id>,
+        Finished(BasicBlock),
+        Discovered(BasicBlock),
+        Unvisited(BasicBlockCandidate),
     }
 
     let mut label_count = 0;
@@ -468,23 +523,12 @@ fn index(block: core::Block, stop: Option<usize>, ids: &mut IdGen) -> IndexedPro
     let mut segments = vec![];
     let mut queue = VecDeque::new();
 
-    macro_rules! unvisited_block {
-        ($block:expr) => {{
-            let Block { mut priors, mut tail } = $block;
-            if let Some(rets) = stop && let TailExpr::Apply(target, args) = tail {
-                assert!(rets <= 1);
-                if rets == 0 {
-                    priors.push((None, Expr::Apply(target, args)));
-                    tail = TailExpr::Unit;
-                } else {
-                    let res = ids.generate();
-                    priors.push((Some(res), Expr::Apply(target, args)));
-                    tail = TailExpr::Var(res);
-                }
-            }
+    macro_rules! build_candidate {
+        ($block:ident) => {{
+            let (priors, tail) = normalize_tail($block, stop, ids);
             let segment = segments.len();
             segments.push(priors.into_boxed_slice());
-            UnvisitedBlock {
+            BasicBlockCandidate {
                 segment,
                 tail,
                 start: 0,
@@ -495,42 +539,26 @@ fn index(block: core::Block, stop: Option<usize>, ids: &mut IdGen) -> IndexedPro
         }}
     }
 
-    queue.push_front(QueueItem::Unvisited(unvisited_block!(block)));
+    queue.push_front(QueueItem::Unvisited(build_candidate!(proc_body)));
 
     while queue.front().is_some_and(|item| !matches!(item, QueueItem::Finished(_))) {
         match queue.pop_front().unwrap() {
             QueueItem::Finished(_) => unreachable!(),
 
-            QueueItem::Discovered(indexed_block) => {
-                queue.push_back(QueueItem::Finished(indexed_block));
+            QueueItem::Discovered(basic_block) => {
+                queue.push_back(QueueItem::Finished(basic_block));
             }
 
-            QueueItem::Unvisited(unvisited_block) => {
-                let UnvisitedBlock { label, input, segment, start, tail, cont_label } = unvisited_block;
+            QueueItem::Unvisited(mut candidate) => {
+                let (end, join) = candidate.split_at_control(&mut segments, ids).unzip();
 
-                let split = segments[segment].iter_mut().enumerate().skip(start).find_map(|(i, (_, e))| {
-                    matches!(e, Expr::IfThenElse(..)).then_some(i)
-                });
+                let end = end.unwrap_or_else(|| segments[candidate.segment].len());
 
-                let (tail, cont_label, join) = match split {
-                    None => (tail, cont_label, None),
-                    Some(split) => {
-                        let (res, Expr::IfThenElse(cond, then_else)) =
-                            take(&mut segments[segment][split])
-                        else { unreachable!() };
+                if let Some(join) = &join && join.label.is_some() {
+                    label_count += 1;
+                }
 
-                        let join = UnvisitedBlock {
-                            label: Some(generate_label!()),
-                            input: res,
-                            segment,
-                            start: split + 1,
-                            tail,
-                            cont_label,
-                        };
-
-                        (TailExpr::IfThenElse(cond, then_else), join.label, Some(join))
-                    }
-                };
+                let BasicBlockCandidate { label, input, segment, start, tail, cont_label } = candidate;
 
                 match tail {
                     TailExpr::Unit | TailExpr::Var(_) | TailExpr::Apply(_, _) => {
@@ -554,38 +582,27 @@ fn index(block: core::Block, stop: Option<usize>, ids: &mut IdGen) -> IndexedPro
 
                             TailExpr::IfThenElse(..) => unreachable!(),
                         };
-                        queue.push_back(QueueItem::Finished(IndexedBlock {
-                            label,
-                            input,
-                            segment,
-                            start,
-                            end: segments[segment].len(),
-                            cont,
-                        }))
+                        queue.push_back(QueueItem::Finished(BasicBlock { label, input, segment, start, end, cont }))
                     }
 
                     TailExpr::IfThenElse(cond, then_else) => {
                         let [then_block, else_block] = *then_else;
                         let then_label = generate_label!();
 
-                        queue.push_front(QueueItem::Discovered(IndexedBlock {
-                            label,
-                            input,
-                            segment,
-                            start,
-                            end: split.unwrap_or(segments[segment].len()),
+                        queue.push_front(QueueItem::Discovered(BasicBlock {
+                            label, input, segment, start, end,
                             cont: Cont::JumpIf { cond, then: then_label },
                         }));
 
-                        queue.push_front(QueueItem::Unvisited(UnvisitedBlock {
+                        queue.push_front(QueueItem::Unvisited(BasicBlockCandidate {
                             cont_label,
-                            .. unvisited_block!(else_block)
+                            .. build_candidate!(else_block)
                         }));
 
-                        queue.push_front(QueueItem::Unvisited(UnvisitedBlock {
+                        queue.push_front(QueueItem::Unvisited(BasicBlockCandidate {
                             label: Some(then_label),
                             cont_label,
-                            .. unvisited_block!(then_block)
+                            .. build_candidate!(then_block)
                         }));
                     }
                 }
@@ -608,18 +625,14 @@ fn index(block: core::Block, stop: Option<usize>, ids: &mut IdGen) -> IndexedPro
         b
     }).collect();
 
-    let mut proc = IndexedProc {
+    ProcCfg {
         segments: segments.into_boxed_slice(),
         blocks: blocks.into_boxed_slice(),
         labeled_blocks,
-        ipdom: Box::default(),
-    };
-
-    proc.ipdom = ipdom(&proc);
-    proc
+    }
 }
 
-impl Graph for IndexedProc {
+impl Graph for ProcCfg {
     type Node = CfgId;
 
     fn node_count(&self) -> usize {
@@ -632,19 +645,19 @@ impl Graph for IndexedProc {
     }
 }
 
-impl EntryNode for IndexedProc {
+impl EntryNode for ProcCfg {
     fn entry(&self) -> CfgId {
         CfgId::new(self.blocks.len() - 1)
     }
 }
 
-impl ExitNode for IndexedProc {
+impl ExitNode for ProcCfg {
     fn exit(&self) -> CfgId {
         CfgId::new(self.blocks.len())
     }
 }
 
-impl Successors for IndexedProc {
+impl Successors for ProcCfg {
     #[allow(refining_impl_trait)]
     fn successors(&self, node: Self::Node) -> impl ExactSizeIterator<Item = Self::Node> {
         exact_size_chain(
@@ -661,7 +674,7 @@ enum InstrIdx {
     Cont,
 }
 
-impl Procedure for IndexedProc {
+impl Procedure for ProcCfg {
     type BlockId = CfgId;
     type VarId = Id;
     type InstrIdx = InstrIdx;
@@ -670,25 +683,36 @@ impl Procedure for IndexedProc {
         self
     }
 
-    fn instructions(&self, b: Self::BlockId) -> impl DoubleEndedIterator<Item = (Self::InstrIdx, Self::VarId, DefUse)> {
+    fn instructions(&self, b: Self::BlockId) -> impl DoubleEndedIterator<Item = (InstrIdx, Id, DefUse)> {
         use core::*;
 
-        let (priors, input_def, cont_vals, cont_ids): (&[_], _, &[Val], &[Id]) = if b == self.exit() {
+        fn instrs<'a>(idx: InstrIdx, def_use: DefUse, vals: &'a [Val], ids: &'a [Id])
+            -> impl DoubleEndedIterator<Item = (InstrIdx, Id, DefUse)> + use<'a>
+        { 
+            chain(
+                vals.iter().filter_map(|val| match val {
+                    Val::Var(id) => Some(id),
+                    Val::Const(_) => None,
+                }),
+                ids,
+            ).map(move |&id| (idx, id, def_use))
+        }
+
+        let (priors, input_defs, cont_vals, cont_ids): (&[_], _, &[Val], &[Id]) = if b == self.exit() {
             (&[], None, &[], &[])
         } else {
             let block = self.block(b);
-            let priors = block.priors();
-            let input_def = block.data.input.map(|id| (InstrIdx::Input, id, DefUse::Def));
+            let input_defs = block.data.input.map(|id| (InstrIdx::Input, id, DefUse::Def));
             let (cont_vals, cont_ids): (&[Val], &[Id]) = match &block.data.cont {
                 Cont::Stop(x) | Cont::Ret(x) => (&[], x.as_slice()),
                 Cont::Jump(_, args) => (args, &[]),
                 Cont::JumpIf { cond, .. } => (&[], slice::from_ref(cond)),
             };
-            (priors, input_def, cont_vals, cont_ids)
+            (block.priors(), input_defs, cont_vals, cont_ids)
         };
 
-        let prior_def_uses = priors.iter().enumerate().flat_map(|(i, prior)| {
-            let (def, expr) = prior;
+        let prior_def_uses = priors.iter().enumerate().flat_map(|(i, (def, expr))| {
+            let def_iter = def.map(|id| (InstrIdx::Prior(i), id, DefUse::Def));
             let (vals, ids): (&[Val], &[Id]) = match expr {
                 Expr::Unit => (&[], &[]),
                 Expr::Val(val) => (slice::from_ref(val), &[]),
@@ -696,22 +720,13 @@ impl Procedure for IndexedProc {
                 Expr::Apply(_, args) => (args, &[]),
                 Expr::IfThenElse(id, _) => (&[], slice::from_ref(id)),
             };
-            let def_iter = def.map(|id| (InstrIdx::Prior(i), id, DefUse::Def));
-            let uses_iter_vals = vals.iter().filter_map(move |val| match val {
-                Val::Var(id) => Some((InstrIdx::Prior(i), *id, DefUse::Use)),
-                Val::Const(_) => None,
-            });
-            let uses_iter_ids = ids.iter().map(move |&id| (InstrIdx::Prior(i), id, DefUse::Use));
-            chain(def_iter, uses_iter_vals).chain(uses_iter_ids)
+            let uses_iter = instrs(InstrIdx::Prior(i), DefUse::Use, vals, ids);
+            chain(def_iter, uses_iter)
         });
 
-        let cont_uses_vals = cont_vals.iter().filter_map(|v| match v {
-            Val::Var(id) => Some((InstrIdx::Cont, *id, DefUse::Use)),
-            Val::Const(_) => None,
-        });
-        let cont_uses_ids = cont_ids.iter().map(|&id| (InstrIdx::Cont, id, DefUse::Use));
+        let cont_uses = instrs(InstrIdx::Cont, DefUse::Use, cont_vals, cont_ids);
 
-        chain(input_def, prior_def_uses).chain(cont_uses_vals).chain(cont_uses_ids)
+        chain(input_defs, prior_def_uses).chain(cont_uses)
     }
 }
 
@@ -735,7 +750,7 @@ mod tests {
             priors: vec![],
             tail: TailExpr::Var(x),
         };
-        let indexed = index(block, Some(1), &mut ids);
+        let indexed = build_cfg(block, Some(1), &mut ids);
         assert_eq!(indexed.blocks.len(), 1);
 
         let entry_successors: Vec<_> = indexed.successors(indexed.entry()).collect();
@@ -764,7 +779,7 @@ mod tests {
                 ]),
             ),
         };
-        let indexed = index(block, Some(1), &mut ids);
+        let indexed = build_cfg(block, Some(1), &mut ids);
         assert_eq!(indexed.blocks.len(), 3);
 
         let entry = indexed.entry();
@@ -801,7 +816,7 @@ mod tests {
             tail: TailExpr::Var(y),
         };
 
-        let indexed = index(block, Some(1), &mut ids);
+        let indexed = build_cfg(block, Some(1), &mut ids);
         assert_eq!(indexed.blocks.len(), 4);
 
         let entry = indexed.entry();

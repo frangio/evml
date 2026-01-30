@@ -1,12 +1,6 @@
 use std::{cmp::Ordering, collections::HashMap, hash::Hash};
 use crate::graph::{EntryNode, ExitNode, Graph, Idx, NodeOrdering, Successors, cache_predecessors, idom, postorder, transpose};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DefUse {
-    Def,
-    Use,
-}
-
 pub trait Procedure {
     type BlockId: Copy + Eq + Idx;
     type VarId: Copy + Eq + Hash;
@@ -18,6 +12,12 @@ pub trait Procedure {
 
 pub trait Cfg: Graph + EntryNode + ExitNode + Successors {}
 impl<T: Graph + EntryNode + ExitNode + Successors> Cfg for T {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefUse {
+    Def,
+    Use,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct VarLiveness<Idx> {
