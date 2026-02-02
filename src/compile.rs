@@ -132,10 +132,10 @@ fn compile_cont(
             stack.popn(1);
             popped += 1;
             next_non_scratch -= 1;
-        } else if frame.push.binary_search(&x).is_ok() {
+        } else if frame.push.contains(&x) {
             let e = (next_non_scratch..stack.len()).find(|&e| {
                 let y = stack.read(e);
-                frame.push.binary_search(&y).is_err()
+                !frame.push.contains(&y)
             }).unwrap();
             next_non_scratch = e + 1;
             if d > 0 {
