@@ -101,6 +101,8 @@ static OPCODE_DATA: LazyLock<OpcodeData> = LazyLock::new(|| {
     add(0xF7, "returndataload", 1, 1);
     add(0xFA, "staticcall", 6, 1);
 
+    add(0x00, "stop", 0, 0);
+
     data
 });
 

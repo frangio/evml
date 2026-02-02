@@ -4,7 +4,7 @@ use crate::graph::{EntryNode, ExitNode, Graph, Idx, NodeOrdering, Successors, ca
 pub trait Procedure {
     type BlockId: Copy + Eq + Idx;
     type VarId: Copy + Eq + Hash;
-    type InstrIdx: Copy;
+    type InstrIdx: Copy + Eq;
 
     fn cfg(&self) -> impl Cfg<Node = Self::BlockId>;
     fn instructions(&self, b: Self::BlockId) -> impl DoubleEndedIterator<Item = (Self::InstrIdx, Self::VarId, DefUse)>;
@@ -54,12 +54,11 @@ impl<Idx: PartialOrd> PartialOrd<Idx> for VarUse<Idx> {
 
 pub struct BlockLiveness<P: Procedure> {
     map: HashMap<P::VarId, VarLiveness<P::InstrIdx>>,
-    in_size: usize,
 }
 
 impl<P: Procedure> Clone for BlockLiveness<P> {
     fn clone(&self) -> Self {
-        Self { map: self.map.clone(), in_size: self.in_size }
+        Self { map: self.map.clone() }
     }
 }
 
@@ -68,12 +67,16 @@ impl<P: Procedure> BlockLiveness<P> {
         self.map.get(&var).is_some_and(|l| l.live_in)
     }
 
-    pub fn last_use(&self, var: P::VarId) -> VarUse<P::InstrIdx> {
-        self.map.get(&var).map_or(VarUse::Unused, |l| l.last_use)
+    pub fn live_out(&self, var: P::VarId) -> bool {
+        self.last_use(var) == VarUse::LiveOut
     }
 
-    pub fn live_in_size(&self) -> usize {
-        self.in_size
+    pub fn live_in_vars(&self) -> impl Iterator<Item = P::VarId> + '_ {
+        self.map.iter().filter_map(|(&var, info)| info.live_in.then_some(var))
+    }
+
+    pub fn last_use(&self, var: P::VarId) -> VarUse<P::InstrIdx> {
+        self.map.get(&var).map_or(VarUse::Unused, |l| l.last_use)
     }
 }
 
@@ -82,20 +85,17 @@ pub fn liveness<P: Procedure>(proc: &P, postorder: &impl NodeOrdering<P::BlockId
     let cfg = proc.cfg();
     let n = cfg.node_count();
 
-    let mut liveness: Box<[BlockLiveness<P>]> = vec![BlockLiveness { map: HashMap::new(), in_size: 0 }; n].into_boxed_slice();
+    let mut liveness: Box<[BlockLiveness<P>]> = vec![BlockLiveness { map: HashMap::new() }; n].into_boxed_slice();
 
     for (bpo, block) in postorder.iter().enumerate() {
-        let mut live: BlockLiveness<P> = BlockLiveness { map: HashMap::new(), in_size: 0 };
+        let mut live: BlockLiveness<P> = BlockLiveness { map: HashMap::new() };
 
         for a in cfg.successors(block) {
             let apo = postorder.position(a);
             assert!(apo < bpo, "cycle detected");
             for (&x, info) in &liveness[a.index()].map {
                 if info.live_in {
-                    live.map.entry(x).or_insert_with(|| {
-                        live.in_size += 1;
-                        VarLiveness { live_in: true, last_use: VarUse::LiveOut }
-                    });
+                    live.map.entry(x).or_insert(VarLiveness { live_in: true, last_use: VarUse::LiveOut });
                 }
             }
         }
@@ -103,20 +103,12 @@ pub fn liveness<P: Procedure>(proc: &P, postorder: &impl NodeOrdering<P::BlockId
         for (i, x, def_use) in proc.instructions(block).rev() {
             match def_use {
                 DefUse::Use => {
-                    live.map.entry(x).or_insert_with(|| {
-                        live.in_size += 1;
-                        VarLiveness { live_in: true, last_use: VarUse::Instr(i) }
-                    });
+                    live.map.entry(x).or_insert(VarLiveness { live_in: true, last_use: VarUse::Instr(i) });
                 }
 
                 DefUse::Def => {
                     live.map.entry(x)
-                        .and_modify(|info| {
-                            if info.live_in {
-                                live.in_size -= 1;
-                            }
-                            info.live_in = false;
-                        })
+                        .and_modify(|info| info.live_in = false)
                         .or_insert(VarLiveness { live_in: false, last_use: VarUse::Instr(i) });
                 }
             }
@@ -248,7 +240,6 @@ mod tests {
             (2, instructions! { use ["x"] }),
         ]);
         let result = liveness(&proc, proc.cfg.postorder());
-        assert_eq!(result[0].live_in_size(), 0);
         assert!(!result[1].live_in("x"));
         assert_eq!(result[1].last_use("x"), VarUse::LiveOut);
         assert!(result[2].live_in("x"));
@@ -278,7 +269,6 @@ mod tests {
         assert_eq!(result[0].last_use("x"), VarUse::LiveOut);
         assert!(result[1].live_in("x"));
         assert_eq!(result[1].last_use("x"), VarUse::Instr(0));
-        assert_eq!(result[2].live_in_size(), 0);
     }
 
     #[test]

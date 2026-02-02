@@ -1,17 +1,16 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::iter::{chain, repeat_n, zip};
 use std::mem::{replace, take};
 use std::num::NonZero;
 use std::slice;
+
 use crate::utils::exact_size_chain;
 use crate::utils::exact_size_iter::iter_some;
 use crate::{asm, core};
 use crate::id::{Id, IdGen};
 use crate::analysis::{self, Cfg, DefUse, Procedure, ipdom, liveness};
 use crate::graph::{EntryNode, ExitNode, Graph, Idx, NodeOrdering, Successors};
-use crate::stack;
-
-type Stack = stack::Stack<CfgId>;
+use crate::stack::Stack;
 
 pub fn compile(program: core::Program, ids: &mut IdGen) -> Vec<asm::Instr> {
     let mut code = vec![];
@@ -33,52 +32,51 @@ fn compile_proc(proc_body: core::Block, args: &[Id], stop: Option<usize>, ids: &
     let mut stack = Stack::new();
     stack.extend(args.iter().copied());
 
-    let mut stacks: Box<[Box<[Id]>]> = vec![Box::default(); proc.blocks.len()].into_boxed_slice();
+    let mut scratch: Box<[Option<Box<[Id]>>]> = vec![None; proc.blocks.len()].into_boxed_slice();
+    scratch[proc.entry().index()] = Some(Box::new([]));
 
-    for block_id in proc.postorder().iter().skip(1).rev() {
-        let block = proc.block(block_id);
+    for block_id in proc.blocks_rpo() {
+        let frame = analysis.frame(block_id);
 
-        if stack.top_base() == Some(block_id) {
-            stack.pop_base();
-            assert!(stacks[block_id.index()].is_empty());
-        } else {
-            stack.extend(take(&mut stacks[block_id.index()]))
-        }
+        let popped = stack.len_framed().strict_sub(frame.frame_size);
+        stack.pop_from_frame(popped);
 
-        let ipdom = analysis.ipdom(block_id);
-        let ipdom_liveness = analysis.liveness(ipdom);
+        stack.extend(scratch[block_id.index()].take().unwrap());
 
         compile_block(
-            block,
+            proc.block(block_id),
             &mut stack,
+            frame,
             analysis.liveness(block_id),
-            ipdom_liveness,
             proc.fallthrough(block_id).and_then(|i| proc.label(i)),
             ids,
             code,
         );
 
-        if stack.top_base() != Some(ipdom) && ipdom != proc.exit() {
-            let new_base_len = ipdom_liveness.live_in_size() - stack.len_base();
-            stack.push_base(ipdom, new_base_len);
+        if !frame.push.is_empty() {
+            stack.push_to_frame(frame.push.len());
+            debug_assert!(frame.push.iter().all(|&id|
+                stack.depth(id).strict_sub(stack.len_scratch()) < frame.push.len()
+            ));
         }
 
         let succ_scratch = stack.drain_scratch().collect();
         let succs = proc.successor_blocks(block_id);
         let succs_scratch = repeat_n(succ_scratch, succs.len());
         for (succ, succ_scratch) in zip(succs, succs_scratch) {
-            stacks[succ.index()] = succ_scratch;
+            scratch[succ.index()] = Some(succ_scratch);
         }
     }
 
-    assert!(stack.top_base().is_none());
+    assert!(stack.len() == stack.len_scratch());
+    debug_assert!(scratch.iter().all(Option::is_none));
 }
 
 fn compile_block(
     block: BasicBlockRef,
-    stack: &mut Stack,
+    stack: &mut Stack<Id>,
+    frame: &BlockFrame,
     liveness: &BlockLiveness,
-    ipdom_liveness: &BlockLiveness,
     fallthrough_label: Option<Id>,
     ids: &mut IdGen,
     code: &mut Vec<asm::Instr>,
@@ -100,8 +98,8 @@ fn compile_block(
     compile_cont(
         &block.data.cont,
         stack,
+        frame,
         liveness,
-        ipdom_liveness,
         fallthrough_label,
         code,
     );
@@ -109,16 +107,16 @@ fn compile_block(
 
 fn compile_cont(
     cont: &Cont,
-    stack: &mut Stack,
+    stack: &mut Stack<Id>,
+    frame: &BlockFrame,
     liveness: &BlockLiveness,
-    ipdom_liveness: &BlockLiveness,
     fallthrough_label: Option<Id>,
     code: &mut Vec<asm::Instr>,
 ) {
     use core::*;
     use asm::*;
 
-    let scratch_end = stack.len() - ipdom_liveness.live_in_size();
+    let scratch_end = stack.len_scratch() - frame.push.len();
     let mut next_non_scratch = scratch_end;
     let mut popped = 0;
 
@@ -134,10 +132,10 @@ fn compile_cont(
             stack.popn(1);
             popped += 1;
             next_non_scratch -= 1;
-        } else if ipdom_liveness.live_in(x) {
+        } else if frame.push.binary_search(&x).is_ok() {
             let e = (next_non_scratch..stack.len()).find(|&e| {
                 let y = stack.read(e);
-                !ipdom_liveness.live_in(y)
+                frame.push.binary_search(&y).is_err()
             }).unwrap();
             next_non_scratch = e + 1;
             if d > 0 {
@@ -184,7 +182,7 @@ fn compile_cont(
 
 fn compile_expr_onto(
     expr: &core::Expr,
-    stack: &mut Stack,
+    stack: &mut Stack<Id>,
     is_last_use: impl Fn(Id) -> bool,
     ids: &mut IdGen,
     code: &mut Vec<asm::Instr>,
@@ -218,7 +216,7 @@ fn compile_expr_onto(
 fn compile_args_onto(
     args: &[core::Val],
     ret_label: Option<Id>,
-    stack: &mut Stack,
+    stack: &mut Stack<Id>,
     is_last_use: impl Fn(Id) -> bool,
     code: &mut Vec<asm::Instr>,
 ) {
@@ -263,7 +261,7 @@ fn compile_args_onto(
 
 fn compile_val_onto(
     val: &core::Val,
-    stack: &mut Stack,
+    stack: &mut Stack<Id>,
     should_swap: impl Fn(Id) -> bool,
     code: &mut Vec<asm::Instr>,
 ) {
@@ -293,13 +291,14 @@ type BlockLiveness = analysis::BlockLiveness<ProcCfg>;
 
 fn analyze(proc: &ProcCfg) -> ProcAnalysis {
     let liveness = liveness(proc, &proc.postorder());
-    let ipdom = ipdom(proc);
-    ProcAnalysis { liveness, ipdom }
+    let ipdoms = ipdom(proc);
+    let frames = build_frames(proc, &liveness, &ipdoms);
+    ProcAnalysis { liveness, frames }
 }
 
 struct ProcAnalysis {
     liveness: Box<[BlockLiveness]>,
-    ipdom: Box<[CfgId]>,
+    frames: Box<[BlockFrame]>,
 }
 
 impl ProcAnalysis {
@@ -307,9 +306,63 @@ impl ProcAnalysis {
         &self.liveness[block_id.index()]
     }
 
-    fn ipdom(&self, block_id: CfgId) -> CfgId {
-        self.ipdom[block_id.index()]
+    fn frame(&self, block_id: CfgId) -> &BlockFrame {
+        &self.frames[block_id.index()]
     }
+}
+
+#[derive(Clone, Debug, Default)]
+struct BlockFrame {
+    frame_size: usize,
+    push: HashSet<Id>,
+}
+
+// This current scheme only works for simple structured acyclic control flow.
+fn build_frames(
+    proc: &ProcCfg,
+    liveness: &[BlockLiveness],
+    ipdoms: &[CfgId],
+) -> Box<[BlockFrame]> {
+    let mut frames = vec![BlockFrame::default(); proc.blocks.len()];
+    let mut parents: Vec<Option<CfgId>> = vec![None; proc.node_count()];
+    parents[proc.entry().index()] = Some(proc.exit());
+    parents[proc.exit().index()] = Some(proc.exit());
+
+    for block_id in proc.blocks_rpo() {
+        let block_idx = block_id.index();
+        let block_liveness = &liveness[block_idx];
+        let ipdom = ipdoms[block_idx];
+        let ipdom_liveness = &liveness[ipdom.index()];
+        let parent = parents[block_idx].unwrap();
+        let parent_ipdom = ipdoms[parent.index()];
+        let parent_ipdom_liveness = &liveness[parent_ipdom.index()];
+
+        let frame = &mut frames[block_idx];
+        frame.push = ipdom_liveness.live_in_vars()
+            .filter(|&x| block_liveness.live_out(x))
+            .filter(|&x| !parent_ipdom_liveness.live_in(x))
+            .collect();
+
+        let (succ_parent, succ_frame_size) = if frame.push.is_empty() {
+            (parent, frame.frame_size)
+        } else {
+            (block_id, frame.frame_size + frame.push.len())
+        };
+
+        if parents[ipdom.index()].is_none() {
+            parents[ipdom.index()] = Some(parent);
+            frames[ipdom.index()].frame_size = frame.frame_size;
+        }
+
+        for succ in proc.successor_blocks(block_id) {
+            if parents[succ.index()].is_none() {
+                parents[succ.index()] = Some(succ_parent);
+                frames[succ.index()].frame_size = succ_frame_size;
+            }
+        }
+    }
+
+    frames.into_boxed_slice()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -392,6 +445,10 @@ impl ProcCfg {
 
     fn postorder(&self) -> IndexedProcPostorder {
         IndexedProcPostorder { block_count: self.blocks.len() }
+    }
+
+    fn blocks_rpo(&self) -> impl Iterator<Item = CfgId> {
+        self.postorder().iter().skip(1).rev()
     }
 }
 
