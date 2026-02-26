@@ -37,6 +37,8 @@ fn compile_proc(proc_body: core::Block, args: &[Id], stop: Option<usize>, ids: &
 
     for block_id in proc.blocks_rpo() {
         let frame = analysis.frame(block_id);
+        let liveness = analysis.liveness(block_id);
+        let last_use = build_last_use(&proc, block_id, liveness.used_count());
 
         let popped = stack.len_framed().strict_sub(frame.frame_size);
         stack.pop_from_frame(popped);
@@ -47,7 +49,8 @@ fn compile_proc(proc_body: core::Block, args: &[Id], stop: Option<usize>, ids: &
             proc.block(block_id),
             &mut stack,
             frame,
-            analysis.liveness(block_id),
+            liveness,
+            &last_use,
             proc.fallthrough(block_id).and_then(|i| proc.label(i)),
             ids,
             code,
@@ -72,11 +75,20 @@ fn compile_proc(proc_body: core::Block, args: &[Id], stop: Option<usize>, ids: &
     debug_assert!(scratch.iter().all(Option::is_none));
 }
 
+fn build_last_use(proc: &ProcCfg, block_id: CfgId, capacity: usize) -> HashMap<Id, InstrIdx> {
+    let mut last_use = HashMap::with_capacity(capacity);
+    for (i, x, _) in proc.instructions(block_id).rev() {
+        last_use.entry(x).or_insert(i);
+    }
+    last_use
+}
+
 fn compile_block(
     block: BasicBlockRef,
     stack: &mut Stack<Id>,
     frame: &BlockFrame,
     liveness: &BlockLiveness,
+    last_use: &HashMap<Id, InstrIdx>,
     fallthrough_label: Option<Id>,
     ids: &mut IdGen,
     code: &mut Vec<asm::Instr>,
@@ -88,7 +100,9 @@ fn compile_block(
     }
 
     for (i, (x, expr)) in block.priors().iter().enumerate() {
-        let is_last_use = |y| liveness.last_use(y) == InstrIdx::Prior(i);
+        let is_last_use = |y| {
+            !liveness.live_out(y) && last_use[&y] == InstrIdx::Prior(i)
+        };
         compile_expr_onto(expr, stack, is_last_use, ids, code);
         if x.is_some() {
             stack.push(*x);
@@ -100,6 +114,7 @@ fn compile_block(
         stack,
         frame,
         liveness,
+        last_use,
         fallthrough_label,
         code,
     );
@@ -110,6 +125,7 @@ fn compile_cont(
     stack: &mut Stack<Id>,
     frame: &BlockFrame,
     liveness: &BlockLiveness,
+    last_use: &HashMap<Id, InstrIdx>,
     fallthrough_label: Option<Id>,
     code: &mut Vec<asm::Instr>,
 ) {
@@ -123,7 +139,8 @@ fn compile_cont(
     for d in 0..scratch_end {
         let d = d - popped;
         let x = stack.read(d);
-        if liveness.last_use(x) < InstrIdx::Cont {
+        let is_cont_last_use = last_use.get(&x) == Some(&InstrIdx::Cont);
+        if !liveness.live_out(x) && !is_cont_last_use {
             if d > 0 {
                 code.push(Instr::Swap(d));
                 stack.swap(d);
@@ -147,7 +164,7 @@ fn compile_cont(
         }
     }
 
-    let should_swap = |x: Id| liveness.last_use(x) == InstrIdx::Cont;
+    let should_swap = |x: Id| !liveness.live_out(x) && last_use[&x] == InstrIdx::Cont;
 
     match *cont {
         Cont::Stop(_) => {
@@ -287,7 +304,7 @@ fn compile_val_onto(
     }
 }
 
-type BlockLiveness = analysis::BlockLiveness<ProcCfg>;
+type BlockLiveness = analysis::BlockLiveness<Id>;
 
 fn analyze(proc: &ProcCfg) -> ProcAnalysis {
     let liveness = liveness(proc, &proc.postorder());
