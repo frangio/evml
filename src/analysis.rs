@@ -1,5 +1,5 @@
 use std::{cmp::Ordering, collections::HashMap, hash::Hash};
-use crate::graph::{EntryNode, ExitNode, Graph, Idx, NodeOrdering, Successors, cache_predecessors, idom, postorder, transpose};
+use crate::graph::{EntryNode, ExitNode, Graph, Idx, NodeOrdering, Successors};
 
 pub trait Procedure {
     type BlockId: Copy + Eq + Idx;
@@ -117,12 +117,6 @@ pub fn liveness<P: Procedure>(proc: &P, postorder: &impl NodeOrdering<P::BlockId
     }
 
     liveness
-}
-
-pub fn ipdom<G: ExitNode + Successors>(cfg: &G) -> Box<[G::Node]> {
-    let rev_cfg = transpose(cache_predecessors(cfg));
-    let rev_postorder = postorder(&rev_cfg);
-    idom(&transpose(cfg), &rev_postorder)
 }
 
 #[cfg(test)]

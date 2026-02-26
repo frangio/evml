@@ -152,6 +152,12 @@ pub fn idom<G: EntryNode + Predecessors>(g: &G, postorder: &impl NodeOrdering<G:
     parents.into_iter().map(dec).collect()
 }
 
+pub fn ipdom<G: ExitNode + Successors>(cfg: &G) -> Box<[G::Node]> {
+    let rev_cfg = transpose(cache_predecessors(cfg));
+    let rev_postorder = postorder(&rev_cfg);
+    idom(&transpose(cfg), &rev_postorder)
+}
+
 pub fn transpose<G>(g: G) -> Transpose<G> {
     Transpose { inner: g }
 }

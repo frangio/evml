@@ -8,8 +8,8 @@ use crate::utils::exact_size_chain;
 use crate::utils::exact_size_iter::iter_some;
 use crate::{asm, core};
 use crate::id::{Id, IdGen};
-use crate::analysis::{self, Cfg, DefUse, Procedure, ipdom, liveness};
-use crate::graph::{EntryNode, ExitNode, Graph, Idx, NodeOrdering, Successors};
+use crate::analysis::{self, Cfg, DefUse, Procedure, liveness};
+use crate::graph::{EntryNode, ExitNode, Graph, Idx, NodeOrdering, Successors, ipdom};
 use crate::stack::Stack;
 
 pub fn compile(program: core::Program, ids: &mut IdGen) -> Vec<asm::Instr> {
