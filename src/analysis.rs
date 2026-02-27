@@ -1,5 +1,6 @@
-use std::{collections::{HashMap, hash_map::Entry}, hash::Hash};
-use crate::graph::{EntryNode, ExitNode, Graph, Idx, NodeOrdering, Successors};
+use std::{collections::{HashMap, HashSet, hash_map::Entry}, hash::Hash};
+use crate::graph::{EntryNode, Graph, Idx, NodeOrdering, Predecessors, Successors, Tree, idom, dfs_intervals};
+use crate::utils::BitSet;
 
 pub trait Procedure {
     type BlockId: Copy + Eq + Idx;
@@ -10,8 +11,8 @@ pub trait Procedure {
     fn instructions(&self, b: Self::BlockId) -> impl DoubleEndedIterator<Item = (Self::InstrIdx, Self::VarId, DefUse)>;
 }
 
-pub trait Cfg: Graph + EntryNode + ExitNode + Successors {}
-impl<T: Graph + EntryNode + ExitNode + Successors> Cfg for T {}
+pub trait Cfg: Graph + EntryNode + Successors + Predecessors {}
+impl<T: Graph + EntryNode + Successors + Predecessors> Cfg for T {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DefUse {
@@ -45,6 +46,10 @@ impl<V: Copy + Eq + Hash> BlockLiveness<V> {
         self.vars.iter().filter_map(|(&var, info)| info.live_in.then_some(var))
     }
 
+    pub fn live_out_vars(&self) -> impl Iterator<Item = V> + '_ {
+        self.vars.iter().filter_map(|(&var, info)| info.live_out.then_some(var))
+    }
+
     pub fn used_count(&self) -> usize {
         self.used_count
     }
@@ -62,7 +67,7 @@ pub fn liveness<P: Procedure>(proc: &P, postorder: &impl NodeOrdering<P::BlockId
 
         for a in cfg.successors(block) {
             let apo = postorder.position(a);
-            assert!(apo < bpo, "cycle detected");
+            if apo >= bpo { todo!("liveness in cyclic cfg") }
             for (&x, info) in &liveness[a.index()].vars {
                 if info.live_in {
                     live.vars.entry(x).or_insert(VarLiveness {
@@ -104,6 +109,115 @@ pub fn liveness<P: Procedure>(proc: &P, postorder: &impl NodeOrdering<P::BlockId
     liveness
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinState {
+    PinOut,
+    PinThrough,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Pinning<V> {
+    pinned: HashMap<V, PinState>,
+}
+
+impl<V: Copy + Eq + Hash> Pinning<V> {
+    pub fn is_pinned_out(&self, var: V) -> bool {
+        self.pinned.contains_key(&var)
+    }
+
+    pub fn is_pinned(&self, var: V) -> bool {
+        self.pinned.get(&var) == Some(&PinState::PinThrough)
+    }
+}
+
+/// Returns, for each block, pinned live-out variables.
+///
+/// - key presence means pinned at block exit
+/// - `PinState::PinOut` means not pinned at block entry
+/// - `PinState::PinThrough` means pinned at block entry and exit
+pub fn pinning<P: Procedure>(
+    proc: &P,
+    postorder: &impl NodeOrdering<P::BlockId>,
+    liveness: &[BlockLiveness<P::VarId>],
+) -> Box<[Pinning<P::VarId>]>
+where
+    P::BlockId: Hash,
+{
+    let cfg = proc.cfg();
+    let n = cfg.node_count();
+
+    let dom_tree = Tree::new(cfg.entry(), idom(&cfg, postorder));
+    let dom_intervals = dfs_intervals(&dom_tree);
+    let dominates = |a: P::BlockId, b: P::BlockId| {
+        let ra = &dom_intervals[a.index()];
+        let rb = &dom_intervals[b.index()];
+        ra.start <= rb.start && rb.end <= ra.end
+    };
+
+    let mut pins: Box<[HashSet<P::BlockId>]> = vec![HashSet::new(); n].into_boxed_slice();
+
+    for b in postorder.iter() {
+        for t in cfg.successors(b) {
+            if b == t || !dominates(b, t) {
+                pins[b.index()].insert(t);
+            }
+        }
+    }
+
+    let mut worklist: Vec<P::BlockId> = postorder.iter().collect();
+    let mut not_queued = BitSet::new(n);
+
+    while let Some(b) = worklist.pop() {
+        not_queued.insert(b.index());
+        let mut changed = false;
+
+        for s in cfg.successors(b) {
+            if s == b {
+                continue;
+            }
+            let [pins_s, pins_b] = pins.get_disjoint_mut([s.index(), b.index()]).unwrap();
+            for &t in pins_s.iter() {
+                if dom_tree.parent(t) != Some(s) {
+                    changed |= pins_b.insert(t);
+                }
+            }
+        }
+
+        if changed {
+            for p in cfg.predecessors(b) {
+                if not_queued.remove(p.index()) {
+                    worklist.push(p);
+                }
+            }
+        }
+    }
+
+    let mut pinned: Box<[Pinning<P::VarId>]> = vec![Pinning { pinned: HashMap::new() }; n].into_boxed_slice();
+
+    for b in cfg.nodes() {
+        for t in pins[b.index()].iter().copied() {
+            let pin_state = if dom_tree.parent(t) == Some(b) {
+                PinState::PinOut
+            } else {
+                PinState::PinThrough
+            };
+
+            for x in liveness[t.index()].live_in_vars() {
+                pinned[b.index()].pinned
+                    .entry(x)
+                    .and_modify(|state| {
+                        if pin_state == PinState::PinThrough {
+                            *state = PinState::PinThrough;
+                        }
+                    })
+                    .or_insert(pin_state);
+            }
+        }
+    }
+
+    pinned
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,7 +234,11 @@ mod tests {
             edges: &[(usize, usize)],
             instructions: &[(usize, &'static [&'static [(DefUse, V)]])],
         ) -> Self {
-            let node_count = edges.iter().flat_map(|&(v, w)| [v, w]).max().map_or(0, |c| c + 1);
+            let node_count = edges
+                .iter()
+                .flat_map(|&(v, w)| [v, w])
+                .max()
+                .map_or(0, |c| c + 1);
             Self::with_nodes(node_count, edges, instructions)
         }
 
@@ -144,8 +262,16 @@ mod tests {
             &self.cfg
         }
 
-        fn instructions(&self, b: Self::BlockId) -> impl DoubleEndedIterator<Item = (Self::InstrIdx, Self::VarId, DefUse)> {
-            self.instructions.get(&b).copied().unwrap_or(&[]).iter().enumerate()
+        fn instructions(
+            &self,
+            b: Self::BlockId,
+        ) -> impl DoubleEndedIterator<Item = (Self::InstrIdx, Self::VarId, DefUse)> {
+            self.instructions
+                .get(&b)
+                .copied()
+                .unwrap_or(&[])
+                .iter()
+                .enumerate()
                 .flat_map(|(i, instr)| instr.iter().map(move |&(du, v)| (i, v, du)))
         }
     }
@@ -159,9 +285,8 @@ mod tests {
     #[test]
     fn test_liveness_single_block() {
         // 0: def x; use x
-        let proc = TestProcedure::with_nodes(1, &[], &[
-            (0, instructions! { def ["x"]; use ["x"] }),
-        ]);
+        let proc =
+            TestProcedure::with_nodes(1, &[], &[(0, instructions! { def ["x"]; use ["x"] })]);
         let result = liveness(&proc, proc.cfg.postorder());
         let a = &result[0];
         assert!(!a.live_in("x"));
@@ -171,10 +296,13 @@ mod tests {
     #[test]
     fn test_liveness_linear() {
         // 0: def x; def y; use x  →  1: use y
-        let proc = TestProcedure::new(&[(0, 1)], &[
-            (0, instructions! { def ["x"]; def ["y"]; use ["x"] }),
-            (1, instructions! { use ["y"] }),
-        ]);
+        let proc = TestProcedure::new(
+            &[(0, 1)],
+            &[
+                (0, instructions! { def ["x"]; def ["y"]; use ["x"] }),
+                (1, instructions! { use ["y"] }),
+            ],
+        );
         let result = liveness(&proc, proc.cfg.postorder());
         let a = &result[0];
         assert!(!a.live_in("x"));
@@ -193,13 +321,13 @@ mod tests {
         //   1   2
         //    \ /
         //     3: use x
-        let proc = TestProcedure::new(&[
-            (0, 1), (0, 2),
-            (1, 3), (2, 3),
-        ], &[
-            (0, instructions! { def ["x"] }),
-            (3, instructions! { use ["x"] }),
-        ]);
+        let proc = TestProcedure::new(
+            &[(0, 1), (0, 2), (1, 3), (2, 3)],
+            &[
+                (0, instructions! { def ["x"] }),
+                (3, instructions! { use ["x"] }),
+            ],
+        );
         let result = liveness(&proc, proc.cfg.postorder());
         assert!(!result[0].live_in("x"));
         assert!(result[0].live_out("x"));
@@ -214,10 +342,13 @@ mod tests {
     #[test]
     fn test_liveness_def_kills() {
         // 0  →  1: def x  →  2: use x
-        let proc = TestProcedure::new(&[(0, 1), (1, 2)], &[
-            (1, instructions! { def ["x"] }),
-            (2, instructions! { use ["x"] }),
-        ]);
+        let proc = TestProcedure::new(
+            &[(0, 1), (1, 2)],
+            &[
+                (1, instructions! { def ["x"] }),
+                (2, instructions! { use ["x"] }),
+            ],
+        );
         let result = liveness(&proc, proc.cfg.postorder());
         assert!(!result[1].live_in("x"));
         assert!(result[1].live_out("x"));
@@ -228,9 +359,8 @@ mod tests {
     #[test]
     fn test_liveness_local() {
         // 0: def x; use x
-        let proc = TestProcedure::with_nodes(1, &[], &[
-            (0, instructions! { def ["x"] ; use ["x"] }),
-        ]);
+        let proc =
+            TestProcedure::with_nodes(1, &[], &[(0, instructions! { def ["x"] ; use ["x"] })]);
         let result = liveness(&proc, proc.cfg.postorder());
         assert!(!result[0].live_in("x"));
         assert!(!result[0].live_out("x"));
@@ -239,10 +369,13 @@ mod tests {
     #[test]
     fn test_liveness_live_out() {
         // 0: def x  →  1: use x  →  2
-        let proc = TestProcedure::new(&[(0, 1), (1, 2)], &[
-            (0, instructions! { def ["x"] }),
-            (1, instructions! { use ["x"] }),
-        ]);
+        let proc = TestProcedure::new(
+            &[(0, 1), (1, 2)],
+            &[
+                (0, instructions! { def ["x"] }),
+                (1, instructions! { use ["x"] }),
+            ],
+        );
         let result = liveness(&proc, proc.cfg.postorder());
         assert!(!result[0].live_in("x"));
         assert!(result[0].live_out("x"));
@@ -253,11 +386,63 @@ mod tests {
     #[test]
     fn test_liveness_multiple_uses() {
         // 0: def x; use x; use x
-        let proc = TestProcedure::with_nodes(1, &[], &[
-            (0, instructions! { def ["x"]; use ["x"]; use ["x"] }),
-        ]);
+        let proc = TestProcedure::with_nodes(
+            1,
+            &[],
+            &[(0, instructions! { def ["x"]; use ["x"]; use ["x"] })],
+        );
         let result = liveness(&proc, proc.cfg.postorder());
         assert!(!result[0].live_in("x"));
         assert!(!result[0].live_out("x"));
+    }
+
+    #[test]
+    fn test_pinning_linear() {
+        // 0: def x  →  1  →  2: use x
+        let proc = TestProcedure::new(
+            &[(0, 1), (1, 2)],
+            &[
+                (0, instructions! { def ["x"] }),
+                (2, instructions! { use ["x"] }),
+            ],
+        );
+        let postorder = proc.cfg.postorder();
+        let live = liveness(&proc, postorder);
+        let result = pinning(&proc, postorder, &live);
+
+        assert!(!result[0].is_pinned_out("x"));
+        assert!(!result[0].is_pinned("x"));
+        assert!(!result[1].is_pinned_out("x"));
+        assert!(!result[1].is_pinned("x"));
+        assert!(!result[2].is_pinned_out("x"));
+        assert!(!result[2].is_pinned("x"));
+    }
+
+    #[test]
+    fn test_pinning_barrier() {
+        // 4: def x -> 0 -> 1 -> 3: use x
+        //               \-> 2 -/
+        let proc = TestProcedure::with_nodes(
+            5,
+            &[(4, 0), (0, 1), (0, 2), (1, 3), (2, 3)],
+            &[
+                (4, instructions! { def ["x"] }),
+                (3, instructions! { use ["x"] }),
+            ],
+        );
+        let postorder = proc.cfg.postorder();
+        let live = liveness(&proc, postorder);
+        let result = pinning(&proc, postorder, &live);
+
+        assert!(!result[4].is_pinned_out("x"));
+        assert!(!result[4].is_pinned("x"));
+        assert!(result[0].is_pinned_out("x"));
+        assert!(!result[0].is_pinned("x"));
+        assert!(result[1].is_pinned_out("x"));
+        assert!(result[1].is_pinned("x"));
+        assert!(result[2].is_pinned_out("x"));
+        assert!(result[2].is_pinned("x"));
+        assert!(!result[3].is_pinned_out("x"));
+        assert!(!result[3].is_pinned("x"));
     }
 }

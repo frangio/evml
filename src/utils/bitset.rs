@@ -16,6 +16,13 @@ impl BitSet {
         self.store[word] |= mask;
         inserted
     }
+
+    pub fn remove(&mut self, x: usize) -> bool {
+        let (word, mask) = word_mask(x);
+        let removed = self.store[word] & mask != 0;
+        self.store[word] &= !mask;
+        removed
+    }
 }
 
 fn word_mask(x: usize) -> (usize, usize) {
