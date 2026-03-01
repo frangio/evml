@@ -33,7 +33,10 @@ fn main() -> Result<()> {
     let asm = disasm(&bytecode);
     let result = run(&bytecode);
 
-    eprintln!("=== CODE ====");
+    eprintln!("=== BYTECODE ===");
+    eprintln!("{}", bytecode.iter().map(|byte| format!("{byte:02x}")).collect::<String>());
+
+    eprintln!("=== ASSEMBLY ====");
     eprintln!("{asm}");
 
     eprintln!("=== RESULT ==");
