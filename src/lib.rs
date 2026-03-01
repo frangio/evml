@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 mod runner;
 mod opcodes;
 mod graph;
@@ -27,11 +29,13 @@ use revm::primitives::U256;
 pub mod ast {
     use crate::U256;
 
+    #[derive(Debug)]
     pub enum Val<T> {
         Const(U256),
         Var(T),
     }
 
+    #[derive(Debug)]
     pub enum Expr<T> {
         Unit,
         Val(Val<T>),
@@ -40,17 +44,20 @@ pub mod ast {
         IfThenElse(Box<(Expr<T>, [Block<T>; 2])>),
     }
 
+    #[derive(Debug)]
     pub struct Block<T> {
         pub priors: Vec<(Option<T>, Expr<T>)>,
         pub tail: Expr<T>,
     }
 
+    #[derive(Debug)]
     pub struct Proc<T> {
         pub args: Box<[T]>,
         pub rets: usize,
         pub body: Block<T>,
     }
 
+    #[derive(Debug)]
     pub struct Program<T> {
         pub procs: Vec<(T, Proc<T>)>,
     }

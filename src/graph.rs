@@ -27,10 +27,6 @@ pub trait EntryNode: Graph {
     fn entry(&self) -> Self::Node;
 }
 
-pub trait ExitNode: Graph {
-    fn exit(&self) -> Self::Node;
-}
-
 pub trait Predecessors: Graph {
     fn predecessors(&self, node: Self::Node) -> impl Iterator<Item = Self::Node>;
 }
@@ -89,12 +85,6 @@ impl<G: Graph + ?Sized> Graph for &G {
 impl<G: EntryNode + ?Sized> EntryNode for &G {
     fn entry(&self) -> Self::Node {
         (*self).entry()
-    }
-}
-
-impl<G: ExitNode + ?Sized> ExitNode for &G {
-    fn exit(&self) -> Self::Node {
-        (*self).exit()
     }
 }
 
@@ -228,16 +218,6 @@ pub fn dfs_intervals<G: EntryNode + Successors>(g: &G) -> Box<[Range<usize>]> {
     ranges
 }
 
-pub fn ipdom<G: ExitNode + Successors>(cfg: &G) -> Box<[G::Node]> {
-    let rev_cfg = transpose(cache_predecessors(cfg));
-    let rev_postorder = postorder(&rev_cfg);
-    let exit = cfg.exit();
-    idom(&transpose(cfg), &rev_postorder)
-        .into_iter()
-        .map(|ipdom| ipdom.unwrap_or(exit))
-        .collect()
-}
-
 pub fn transpose<G>(g: G) -> Transpose<G> {
     Transpose { inner: g }
 }
@@ -255,18 +235,6 @@ impl<G: Graph> Graph for Transpose<G> {
 
     fn nodes(&self) -> impl Iterator<Item = Self::Node> {
         self.inner.nodes()
-    }
-}
-
-impl<G: ExitNode> EntryNode for Transpose<G> {
-    fn entry(&self) -> Self::Node {
-        self.inner.exit()
-    }
-}
-
-impl<G: EntryNode> ExitNode for Transpose<G> {
-    fn exit(&self) -> Self::Node {
-        self.inner.entry()
     }
 }
 
@@ -418,12 +386,6 @@ impl<G: Graph> Graph for CachedPredecessors<G> {
     }
 }
 
-impl<G: ExitNode> ExitNode for CachedPredecessors<G> {
-    fn exit(&self) -> G::Node {
-        self.inner.exit()
-    }
-}
-
 impl<G: Successors> Successors for CachedPredecessors<G> {
     fn successors(&self, node: Self::Node) -> impl Iterator<Item = Self::Node> {
         self.inner.successors(node)
@@ -473,7 +435,6 @@ pub mod tests {
         pub node_count: usize,
         pub edges: Vec<(usize, usize)>,
         entry: OnceCell<usize>,
-        exit: OnceCell<usize>,
         postorder: OnceCell<ArrayNodeOrdering<usize>>,
     }
 
@@ -493,7 +454,6 @@ pub mod tests {
                 node_count,
                 edges,
                 entry: OnceCell::new(),
-                exit: OnceCell::new(),
                 postorder: OnceCell::new(),
             }
         }
@@ -531,18 +491,6 @@ pub mod tests {
                 let entry = entries.next().expect("no entry node found");
                 assert!(entries.next().is_none(), "multiple entry nodes found");
                 entry
-            })
-        }
-    }
-
-    impl ExitNode for TestGraph {
-        fn exit(&self) -> usize {
-            *self.exit.get_or_init(|| {
-                let mut exits =
-                    (0..self.node_count).filter(|&n| self.successors(n).next().is_none());
-                let exit = exits.next().expect("no exit node found");
-                assert!(exits.next().is_none(), "multiple exit nodes found");
-                exit
             })
         }
     }

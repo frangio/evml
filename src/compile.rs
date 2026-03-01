@@ -1,15 +1,14 @@
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::iter::{chain, repeat_n, zip};
+use std::collections::{HashMap, VecDeque};
+use std::iter::chain;
 use std::mem::{replace, take};
 use std::num::NonZero;
 use std::slice;
 
 use crate::utils::exact_size_chain;
-use crate::utils::exact_size_iter::iter_some;
 use crate::{asm, core};
 use crate::id::{Id, IdGen};
 use crate::analysis::{self, Cfg, DefUse, Procedure, liveness};
-use crate::graph::{EdgeArray, EntryNode, ExitNode, Graph, Idx, NodeOrdering, Predecessors, Successors, ipdom, predecessor_edges};
+use crate::graph::{dfs, EdgeArray, EntryNode, Graph, Idx, NodeOrdering, Predecessors, Successors, Tree, idom, predecessor_edges};
 use crate::stack::Stack;
 
 pub fn compile(program: core::Program, ids: &mut IdGen) -> Vec<asm::Instr> {
@@ -34,51 +33,54 @@ fn compile_proc(
 ) {
     let proc = build_cfg(proc_body, stop, ids);
     let analysis = analyze(&proc);
+    let mut block_code: Box<[Vec<asm::Instr>]> = vec![vec![]; proc.blocks.len()].into_boxed_slice();
 
     let mut stack = Stack::new();
     stack.extend(args.iter().copied());
 
-    let mut scratch: Box<[Option<Box<[Id]>>]> = vec![None; proc.blocks.len()].into_boxed_slice();
-    scratch[proc.entry().index()] = Some(Box::new([]));
-
-    for block_id in proc.blocks_rpo() {
-        let frame = analysis.frame(block_id);
+    let dom_tree = analysis.dom_tree();
+    for visit in dfs(dom_tree) {
+        let block_id = visit.node;
+        if visit.exit {
+            stack.pop_checkpoint();
+            continue;
+        }
+        stack.push_checkpoint();
         let liveness = analysis.liveness(block_id);
+        let pinning = analysis.pinning(block_id);
         let last_use = build_last_use(&proc, block_id, liveness.used_count());
 
-        let popped = stack.len_framed().strict_sub(frame.frame_size);
-        stack.pop_from_frame(popped);
+        let needs_normalization =
+            proc.predecessors(block_id).any(|p| Some(p) != dom_tree.parent(block_id));
+        if needs_normalization {
+            let count_popped = stack
+                .contents()
+                .iter()
+                .copied()
+                .rev()
+                .take_while(|&x| x.is_none_or(|x| !pinning.is_pinned_through(x)))
+                .filter(|&x| x.is_none_or(|x| !liveness.live_in(x)))
+                .count();
+            stack.popn(count_popped);
+        }
 
-        stack.extend(scratch[block_id.index()].take().unwrap());
-
+        let block = proc.block(block_id);
         compile_block(
-            proc.block(block_id),
+            block,
             &mut stack,
-            frame,
             liveness,
+            pinning,
             &last_use,
             proc.fallthrough(block_id).and_then(|i| proc.label(i)),
             ids,
-            code,
+            &mut block_code[block_id.index()],
         );
-
-        if !frame.push.is_empty() {
-            stack.push_to_frame(frame.push.len());
-            debug_assert!(frame.push.iter().all(|&id|
-                stack.depth(id).strict_sub(stack.len_scratch()) < frame.push.len()
-            ));
-        }
-
-        let succ_scratch = stack.drain_scratch().collect();
-        let succs = proc.successor_blocks(block_id);
-        let succs_scratch = repeat_n(succ_scratch, succs.len());
-        for (succ, succ_scratch) in zip(succs, succs_scratch) {
-            scratch[succ.index()] = Some(succ_scratch);
-        }
     }
 
-    assert!(stack.len() == stack.len_scratch());
-    debug_assert!(scratch.iter().all(Option::is_none));
+    code.reserve(block_code.iter().map(Vec::len).sum());
+    for block_id in proc.blocks_rpo() {
+        code.extend(take(&mut block_code[block_id.index()]));
+    }
 }
 
 fn build_last_use(proc: &ProcCfg, block_id: CfgId, capacity: usize) -> HashMap<Id, InstrIdx> {
@@ -92,8 +94,8 @@ fn build_last_use(proc: &ProcCfg, block_id: CfgId, capacity: usize) -> HashMap<I
 fn compile_block(
     block: BasicBlockRef,
     stack: &mut Stack<Id>,
-    frame: &BlockFrame,
     liveness: &BlockLiveness,
+    pinning: &BlockPinning,
     last_use: &HashMap<Id, InstrIdx>,
     fallthrough_label: Option<Id>,
     ids: &mut IdGen,
@@ -107,7 +109,7 @@ fn compile_block(
 
     for (i, (x, expr)) in block.priors().iter().enumerate() {
         let is_last_use = |y| !liveness.live_out(y) && last_use[&y] == InstrIdx::Prior(i);
-        compile_expr_onto(expr, stack, is_last_use, ids, code);
+        compile_expr_onto(expr, stack, pinning, is_last_use, ids, code);
         if x.is_some() {
             stack.push(*x);
         }
@@ -116,8 +118,8 @@ fn compile_block(
     compile_cont(
         &block.data.cont,
         stack,
-        frame,
         liveness,
+        pinning,
         last_use,
         fallthrough_label,
         code,
@@ -127,8 +129,8 @@ fn compile_block(
 fn compile_cont(
     cont: &Cont,
     stack: &mut Stack<Id>,
-    frame: &BlockFrame,
     liveness: &BlockLiveness,
+    pinning: &BlockPinning,
     last_use: &HashMap<Id, InstrIdx>,
     fallthrough_label: Option<Id>,
     code: &mut Vec<asm::Instr>,
@@ -136,13 +138,10 @@ fn compile_cont(
     use asm::*;
     use core::*;
 
-    let scratch_end = stack.len_scratch() - frame.push.len();
-    let mut next_non_scratch = scratch_end;
     let mut popped = 0;
-
-    for d in 0..scratch_end {
+    for d in 0..stack.len() {
         let d = d - popped;
-        let x = stack.read(d);
+        let Some(x) = stack.read(d) else { continue };
         let is_cont_last_use = last_use.get(&x) == Some(&InstrIdx::Cont);
         if !liveness.live_out(x) && !is_cont_last_use {
             if d > 0 {
@@ -152,25 +151,10 @@ fn compile_cont(
             code.push(Instr::Pop);
             stack.popn(1);
             popped += 1;
-            next_non_scratch -= 1;
-        } else if frame.push.contains(&x) {
-            let e = (next_non_scratch..stack.len())
-                .find(|&e| {
-                    let y = stack.read(e);
-                    !frame.push.contains(&y)
-                })
-                .unwrap();
-            next_non_scratch = e + 1;
-            if d > 0 {
-                code.push(Instr::Swap(d));
-                stack.swap(d);
-            }
-            code.push(Instr::Swap(e));
-            stack.swap(e);
         }
     }
 
-    let should_swap = |x: Id| !liveness.live_out(x) && last_use[&x] == InstrIdx::Cont;
+    let should_move = |x: Id| !liveness.live_out(x) && last_use[&x] == InstrIdx::Cont;
 
     match *cont {
         Cont::Stop(_) => {
@@ -186,7 +170,7 @@ fn compile_cont(
         }
 
         Cont::Jump(target, ref args) => {
-            compile_args_onto(args, None, stack, should_swap, code);
+            compile_args_onto(args, None, stack, pinning, should_move, code);
             stack.popn(args.len());
 
             if Some(target) != fallthrough_label {
@@ -196,7 +180,8 @@ fn compile_cont(
         }
 
         Cont::JumpIf { cond, then } => {
-            compile_val_onto(&Val::Var(cond), stack, should_swap, code);
+            let may_swap = !is_stack_top_pinned(stack, pinning);
+            compile_val_onto(&Val::Var(cond), stack, should_move, may_swap, code);
             code.push(Instr::PushLabel(then));
             code.push(Instr::JumpIf);
         }
@@ -206,6 +191,7 @@ fn compile_cont(
 fn compile_expr_onto(
     expr: &core::Expr,
     stack: &mut Stack<Id>,
+    pinning: &BlockPinning,
     is_last_use: impl Fn(Id) -> bool,
     ids: &mut IdGen,
     code: &mut Vec<asm::Instr>,
@@ -213,19 +199,24 @@ fn compile_expr_onto(
     use core::*;
     use asm::*;
     match expr {
-        Expr::Val(val) => {
-            compile_val_onto(val, stack, is_last_use, code);
+        Expr::Val(val @ Val::Const(_)) => {
+            compile_val_onto(val, stack, is_last_use, true, code);
+        }
+
+        Expr::Val(val @ Val::Var(_)) => {
+            let may_swap = !is_stack_top_pinned(stack, pinning);
+            compile_val_onto(val, stack, is_last_use, may_swap, code);
         }
 
         Expr::Op(op, args) => {
-            compile_args_onto(args, None, stack, is_last_use, code);
+            compile_args_onto(args, None, stack, pinning, is_last_use, code);
             code.push(Instr::Op(*op));
             stack.popn(args.len());
         }
 
         Expr::Apply(target, args) => {
             let ret = ids.generate();
-            compile_args_onto(args, Some(ret), stack, is_last_use, code);
+            compile_args_onto(args, Some(ret), stack, pinning, is_last_use, code);
             code.push(Instr::PushLabel(*target));
             code.push(Instr::Jump);
             code.push(Instr::JumpDest(ret));
@@ -240,22 +231,29 @@ fn compile_args_onto(
     args: &[core::Val],
     ret_label: Option<Id>,
     stack: &mut Stack<Id>,
+    pinning: &BlockPinning,
     is_last_use: impl Fn(Id) -> bool,
     code: &mut Vec<asm::Instr>,
 ) {
     use asm::*;
     use core::*;
 
-    let should_swap = |x, i| is_last_use(x) && !args[..i].contains(&Val::Var(x));
+    let should_move = |x, i| is_last_use(x) && !args[..i].contains(&Val::Var(x));
 
-    let stack_delta = args
+    let move_count = args
         .iter()
         .enumerate()
-        .filter(|&(i, v)| match v {
-            Val::Const(_) => true,
-            Val::Var(x) => !should_swap(*x, i),
-        })
+        .filter(|&(i, v)| matches!(v, Val::Var(x) if should_move(*x, i)))
         .count();
+
+    let may_swap = (0..move_count)
+        .all(|depth| stack.read(depth).is_none_or(|x| !pinning.is_pinned(x)));
+
+    let stack_delta = if may_swap {
+        args.len() - move_count
+    } else {
+        args.len()
+    };
 
     if let Some(ret_label) = ret_label {
         code.push(Instr::PushLabel(ret_label));
@@ -270,8 +268,8 @@ fn compile_args_onto(
     let target_stack_len = stack.len() + stack_delta;
 
     for (i, v) in args.iter().enumerate().rev() {
-        let should_swap = |x: Id| should_swap(x, i);
-        compile_val_onto(v, stack, should_swap, code);
+        let should_move = |x: Id| should_move(x, i);
+        compile_val_onto(v, stack, should_move, may_swap, code);
         stack.push(None);
         let rem_delta = target_stack_len - stack.len();
         let offset = i - rem_delta;
@@ -285,7 +283,8 @@ fn compile_args_onto(
 fn compile_val_onto(
     val: &core::Val,
     stack: &mut Stack<Id>,
-    should_swap: impl Fn(Id) -> bool,
+    should_move: impl Fn(Id) -> bool,
+    may_swap: bool,
     code: &mut Vec<asm::Instr>,
 ) {
     use asm::*;
@@ -297,12 +296,19 @@ fn compile_val_onto(
 
         Val::Var(x) => {
             let depth = stack.depth(x);
-            if should_swap(x) {
-                if depth > 0 {
-                    code.push(Instr::Swap(depth));
-                    stack.swap(depth);
+            if should_move(x) {
+                if may_swap {
+                    if depth > 0 {
+                        code.push(Instr::Swap(depth));
+                        stack.swap(depth);
+                    }
+                    stack.popn(1);
+                } else {
+                    code.push(Instr::Dup(depth));
+                    stack.push(None);
+                    stack.swap(depth + 1);
+                    stack.popn(1);
                 }
-                stack.popn(1);
             } else {
                 code.push(Instr::Dup(depth));
             }
@@ -311,17 +317,24 @@ fn compile_val_onto(
 }
 
 type BlockLiveness = analysis::BlockLiveness<Id>;
+type BlockPinning = analysis::Pinning<Id>;
+
+fn is_stack_top_pinned(stack: &Stack<Id>, pinning: &BlockPinning) -> bool {
+    stack.read(0).is_some_and(|y| pinning.is_pinned(y))
+}
 
 fn analyze(proc: &ProcCfg) -> ProcAnalysis {
-    let liveness = liveness(proc, &proc.postorder());
-    let ipdoms = ipdom(proc);
-    let frames = build_frames(proc, &liveness, &ipdoms);
-    ProcAnalysis { liveness, frames }
+    let postorder = proc.postorder();
+    let liveness = liveness(proc, &postorder);
+    let dom_tree = Tree::new(proc.entry(), idom(proc, &postorder));
+    let pinning = analysis::pinning(proc, &postorder, &dom_tree, &liveness);
+    ProcAnalysis { liveness, pinning, dom_tree }
 }
 
 struct ProcAnalysis {
     liveness: Box<[BlockLiveness]>,
-    frames: Box<[BlockFrame]>,
+    pinning: Box<[BlockPinning]>,
+    dom_tree: Tree<CfgId>,
 }
 
 impl ProcAnalysis {
@@ -329,60 +342,13 @@ impl ProcAnalysis {
         &self.liveness[block_id.index()]
     }
 
-    fn frame(&self, block_id: CfgId) -> &BlockFrame {
-        &self.frames[block_id.index()]
-    }
-}
-
-#[derive(Clone, Debug, Default)]
-struct BlockFrame {
-    frame_size: usize,
-    push: HashSet<Id>,
-}
-
-// This current scheme only works for simple structured acyclic control flow.
-fn build_frames(proc: &ProcCfg, liveness: &[BlockLiveness], ipdoms: &[CfgId]) -> Box<[BlockFrame]> {
-    let mut frames = vec![BlockFrame::default(); proc.blocks.len()];
-    let mut parents: Vec<Option<CfgId>> = vec![None; proc.node_count()];
-    parents[proc.entry().index()] = Some(proc.exit());
-    parents[proc.exit().index()] = Some(proc.exit());
-
-    for block_id in proc.blocks_rpo() {
-        let block_idx = block_id.index();
-        let block_liveness = &liveness[block_idx];
-        let ipdom = ipdoms[block_idx];
-        let ipdom_liveness = &liveness[ipdom.index()];
-        let parent = parents[block_idx].unwrap();
-        let parent_ipdom = ipdoms[parent.index()];
-        let parent_ipdom_liveness = &liveness[parent_ipdom.index()];
-
-        let frame = &mut frames[block_idx];
-        frame.push = ipdom_liveness
-            .live_in_vars()
-            .filter(|&x| block_liveness.live_out(x))
-            .filter(|&x| !parent_ipdom_liveness.live_in(x))
-            .collect();
-
-        let (succ_parent, succ_frame_size) = if frame.push.is_empty() {
-            (parent, frame.frame_size)
-        } else {
-            (block_id, frame.frame_size + frame.push.len())
-        };
-
-        if parents[ipdom.index()].is_none() {
-            parents[ipdom.index()] = Some(parent);
-            frames[ipdom.index()].frame_size = frame.frame_size;
-        }
-
-        for succ in proc.successor_blocks(block_id) {
-            if parents[succ.index()].is_none() {
-                parents[succ.index()] = Some(succ_parent);
-                frames[succ.index()].frame_size = succ_frame_size;
-            }
-        }
+    fn pinning(&self, block_id: CfgId) -> &BlockPinning {
+        &self.pinning[block_id.index()]
     }
 
-    frames.into_boxed_slice()
+    fn dom_tree(&self) -> &Tree<CfgId> {
+        &self.dom_tree
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -436,7 +402,6 @@ impl ProcCfg {
     }
 
     fn fallthrough(&self, block_id: CfgId) -> Option<CfgId> {
-        assert!(block_id != self.exit());
         block_id.index().checked_sub(1).map(CfgId::new)
     }
 
@@ -456,17 +421,6 @@ impl ProcCfg {
         exact_size_chain(target, fallthrough)
     }
 
-    fn is_exit_block(&self, block_id: CfgId) -> bool {
-        if block_id == self.exit() {
-            return false;
-        }
-        match self.block(block_id).data.cont {
-            Cont::Stop(_) | Cont::Ret(_) => true,
-            Cont::Jump(target, _) => !self.labeled_blocks.contains_key(&target),
-            Cont::JumpIf { .. } => false,
-        }
-    }
-
     fn postorder(&self) -> IndexedProcPostorder {
         IndexedProcPostorder {
             block_count: self.blocks.len(),
@@ -474,7 +428,7 @@ impl ProcCfg {
     }
 
     fn blocks_rpo(&self) -> impl Iterator<Item = CfgId> {
-        self.postorder().iter().skip(1).rev()
+        self.postorder().iter().rev()
     }
 }
 
@@ -496,29 +450,18 @@ pub struct IndexedProcPostorder {
 impl NodeOrdering<CfgId> for IndexedProcPostorder {
     fn position(&self, node: CfgId) -> usize {
         let index = node.index();
-        assert!(index <= self.block_count);
-        if index == self.block_count {
-            0
-        } else {
-            index + 1
-        }
+        assert!(index < self.block_count);
+        index
     }
 
     fn node_at(&self, position: usize) -> CfgId {
-        assert!(position <= self.block_count);
-        if position == 0 {
-            CfgId::new(self.block_count)
-        } else {
-            CfgId::new(position - 1)
-        }
+        assert!(position < self.block_count);
+        CfgId::new(position)
     }
 
     #[allow(refining_impl_trait)]
     fn iter(&self) -> impl DoubleEndedIterator<Item = CfgId> + ExactSizeIterator + use<> {
-        exact_size_chain(
-            [CfgId::new(self.block_count)],
-            (0..self.block_count).map(CfgId::new),
-        )
+        (0..self.block_count).map(CfgId::new)
     }
 }
 
@@ -774,7 +717,7 @@ impl Graph for ProcCfg {
     type Node = CfgId;
 
     fn node_count(&self) -> usize {
-        self.blocks.len() + 1
+        self.blocks.len()
     }
 
     fn nodes(&self) -> impl Iterator<Item = Self::Node> {
@@ -789,19 +732,10 @@ impl EntryNode for ProcCfg {
     }
 }
 
-impl ExitNode for ProcCfg {
-    fn exit(&self) -> CfgId {
-        CfgId::new(self.blocks.len())
-    }
-}
-
 impl Successors for ProcCfg {
     #[allow(refining_impl_trait)]
     fn successors(&self, node: Self::Node) -> impl ExactSizeIterator<Item = Self::Node> {
-        exact_size_chain(
-            iter_some((node != self.exit()).then(|| self.successor_blocks(node))),
-            self.is_exit_block(node).then_some(self.exit()),
-        )
+        self.successor_blocks(node)
     }
 }
 
@@ -849,22 +783,17 @@ impl Procedure for ProcCfg {
             .map(move |&id| (idx, id, def_use))
         }
 
-        let (priors, input_defs, cont_vals, cont_ids): (&[_], _, &[Val], &[Id]) =
-            if b == self.exit() {
-                (&[], None, &[], &[])
-            } else {
-                let block = self.block(b);
-                let input_defs = block
-                    .data
-                    .input
-                    .map(|id| (InstrIdx::Input, id, DefUse::Def));
-                let (cont_vals, cont_ids): (&[Val], &[Id]) = match &block.data.cont {
-                    Cont::Stop(x) | Cont::Ret(x) => (&[], x.as_slice()),
-                    Cont::Jump(_, args) => (args, &[]),
-                    Cont::JumpIf { cond, .. } => (&[], slice::from_ref(cond)),
-                };
-                (block.priors(), input_defs, cont_vals, cont_ids)
-            };
+        let block = self.block(b);
+        let input_defs = block
+            .data
+            .input
+            .map(|id| (InstrIdx::Input, id, DefUse::Def));
+        let (cont_vals, cont_ids): (&[Val], &[Id]) = match &block.data.cont {
+            Cont::Stop(x) | Cont::Ret(x) => (&[], x.as_slice()),
+            Cont::Jump(_, args) => (args, &[]),
+            Cont::JumpIf { cond, .. } => (&[], slice::from_ref(cond)),
+        };
+        let priors = block.priors();
 
         let prior_def_uses = priors.iter().enumerate().flat_map(|(i, (def, expr))| {
             let def_iter = def.map(|id| (InstrIdx::Prior(i), id, DefUse::Def));
@@ -917,11 +846,7 @@ mod tests {
         assert_eq!(indexed.blocks.len(), 1);
 
         let entry_successors: Vec<_> = indexed.successors(indexed.entry()).collect();
-        assert_eq!(entry_successors.len(), 1);
-        let [exit] = entry_successors[..] else {
-            panic!()
-        };
-        assert_eq!(exit, indexed.exit());
+        assert!(entry_successors.is_empty());
     }
 
     #[test]
@@ -958,12 +883,7 @@ mod tests {
         let branch1_successors: Vec<_> = indexed.successors(branch1).collect();
 
         assert_eq!(branch0_successors, branch1_successors);
-        assert_eq!(branch0_successors.len(), 1);
-        let [exit] = branch0_successors[..] else {
-            panic!()
-        };
-
-        assert_eq!(exit, indexed.exit());
+        assert!(branch0_successors.is_empty());
     }
 
     #[test]
@@ -1014,12 +934,7 @@ mod tests {
         };
 
         let tail_successors: Vec<_> = indexed.successors(tail).collect();
-        assert_eq!(tail_successors.len(), 1);
-        let [exit] = tail_successors[..] else {
-            panic!()
-        };
-
-        assert_eq!(exit, indexed.exit());
+        assert!(tail_successors.is_empty());
     }
 
     #[test]

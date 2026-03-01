@@ -1,26 +1,25 @@
-use std::collections::HashMap;
 use std::hash::Hash;
 
-/// A stack divided into two regions: a frame and a scratch area.
-///
-/// The frame holds items that cannot be moved or removed. The scratch area sits on top and
-/// can be freely manipulated. Frame items are indexed for O(1) depth lookup.
-///
-/// Slots in the scratch area may be `None` to represent "temporary" items with no
-/// associated value. Frame slots must always contain a value.
-#[derive(Debug)]
+/// A stack of values and temporary holes, with lazy checkpoint/restore support.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stack<T> {
     contents: Vec<Option<T>>,
-    index: HashMap<T, usize>,
-    framed: usize,
+    backup: Vec<Option<T>>,
+    checkpoints: Vec<Checkpoint>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Checkpoint {
+    stack_height: usize,
+    backup_start: usize,
 }
 
 impl<T: Copy + Eq + Hash> Stack<T> {
     pub fn new() -> Self {
         Self {
-            index: HashMap::new(),
             contents: Vec::new(),
-            framed: 0,
+            backup: Vec::new(),
+            checkpoints: Vec::new(),
         }
     }
 
@@ -28,12 +27,18 @@ impl<T: Copy + Eq + Hash> Stack<T> {
         self.contents.len()
     }
 
-    pub fn len_scratch(&self) -> usize {
-        self.len() - self.framed
+    pub fn push_checkpoint(&mut self) {
+        self.checkpoints.push(Checkpoint {
+            stack_height: self.len(),
+            backup_start: self.backup.len(),
+        });
     }
 
-    pub fn len_framed(&self) -> usize {
-        self.framed
+    pub fn pop_checkpoint(&mut self) {
+        let checkpoint = self.checkpoints.pop().unwrap();
+        let saved_len = self.backup.len() - checkpoint.backup_start;
+        self.contents.truncate(checkpoint.stack_height - saved_len);
+        self.contents.extend(self.backup.drain(checkpoint.backup_start..).rev());
     }
 
     pub fn push(&mut self, x: Option<T>) {
@@ -41,54 +46,48 @@ impl<T: Copy + Eq + Hash> Stack<T> {
     }
 
     pub fn popn(&mut self, count: usize) {
-        assert!(count <= self.len_scratch());
-        self.contents.truncate(self.len() - count);
+        assert!(count <= self.len());
+        let new_len = self.len() - count;
+        self.backup_from(new_len);
+        self.contents.truncate(new_len);
+    }
+
+    pub fn read(&self, depth: usize) -> Option<T> {
+        let top = self.len().checked_sub(1)?;
+        let index = top.checked_sub(depth)?;
+        self.contents.get(index).copied().flatten()
+    }
+
+    pub fn depth(&self, x: T) -> usize {
+        let index = self.contents
+            .iter()
+            .rposition(|y| y.as_ref().is_some_and(|&y| y == x))
+            .unwrap();
+        self.len() - 1 - index
     }
 
     pub fn swap(&mut self, depth: usize) {
-        assert!(depth < self.len_scratch());
-        let contents_top = self.contents.len() - 1;
-        let contents_index = contents_top - depth;
-        self.contents.swap(contents_index, contents_top);
+        assert!(depth < self.len());
+        let top = self.len() - 1;
+        let index = top - depth;
+        self.backup_from(index);
+        self.contents.swap(index, top);
     }
 
-    pub fn read(&self, depth: usize) -> T {
-        let contents_top = self.contents.len() - 1;
-        let contents_index = contents_top - depth;
-        self.contents[contents_index].unwrap()
-    }
-
-    /// Returns the depth of the first occurrence of `x` from the top.
-    pub fn depth(&self, x: T) -> usize {
-        if let Some(index) = self.contents[self.framed..].iter()
-            .rposition(|y| y.as_ref().is_some_and(|&y| y == x))
-        {
-            self.len() - self.framed - 1 - index
-        } else {
-            self.len() - 1 - self.index[&x]
+    fn backup_from(&mut self, index: usize) {
+        let Some(checkpoint) = self.checkpoints.last() else {
+            return;
+        };
+        let backed_up = self.backup.len() - checkpoint.backup_start;
+        let watermark = checkpoint.stack_height - backed_up;
+        if index < watermark {
+            self.backup.extend(self.contents[index..watermark].iter().rev().copied());
         }
     }
 
-    pub fn drain_scratch(&mut self) -> impl ExactSizeIterator<Item = T> + '_ {
-        self.contents.drain(self.framed..).map(Option::unwrap)
+    fn contents(&self) -> &[Option<T>] {
+        &self.contents
     }
-
-    pub fn push_to_frame(&mut self, count: usize) {
-        for i in 0..count {
-            let x = self.contents[self.framed + i].unwrap();
-            self.index.insert(x, self.framed + i);
-        }
-        self.framed += count;
-    }
-
-    pub fn pop_from_frame(&mut self, count: usize) {
-        self.framed -= count;
-        for i in 0..count {
-            let x = self.contents[self.framed + i].unwrap();
-            self.index.remove(&x);
-        }
-    }
-
 }
 
 impl<T: Copy + Eq + Hash> Extend<T> for Stack<T> {
@@ -100,12 +99,10 @@ impl<T: Copy + Eq + Hash> Extend<T> for Stack<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn new_stack_is_empty() {
         let s: Stack<u8> = Stack::new();
         assert_eq!(s.len(), 0);
-        assert_eq!(s.len_scratch(), 0);
     }
 
     #[test]
@@ -114,7 +111,6 @@ mod tests {
         s.push(Some(1));
         s.push(None);
         assert_eq!(s.len(), 2);
-        assert_eq!(s.len_scratch(), 2);
     }
 
     #[test]
@@ -130,25 +126,16 @@ mod tests {
         s.extend([1, 2, 3]);
         s.popn(2);
         assert_eq!(s.len(), 1);
-        assert_eq!(s.read(0), 1);
-    }
-
-    #[test]
-    #[should_panic]
-    fn popn_panics_if_exceeds_scratch() {
-        let mut s: Stack<u8> = Stack::new();
-        s.extend([1, 2]);
-        s.push_to_frame(2);
-        s.popn(1);
+        assert_eq!(s.read(0), Some(1));
     }
 
     #[test]
     fn read_returns_item_at_depth() {
         let mut s: Stack<u8> = Stack::new();
         s.extend([10, 20, 30]);
-        assert_eq!(s.read(0), 30); // top
-        assert_eq!(s.read(1), 20);
-        assert_eq!(s.read(2), 10); // bottom
+        assert_eq!(s.read(0), Some(30)); // top
+        assert_eq!(s.read(1), Some(20));
+        assert_eq!(s.read(2), Some(10)); // bottom
     }
 
     #[test]
@@ -156,8 +143,8 @@ mod tests {
         let mut s: Stack<u8> = Stack::new();
         s.extend([1, 2, 3]);
         s.swap(2);
-        assert_eq!(s.read(0), 1);
-        assert_eq!(s.read(2), 3);
+        assert_eq!(s.read(0), Some(1));
+        assert_eq!(s.read(2), Some(3));
     }
 
     #[test]
@@ -170,48 +157,12 @@ mod tests {
     }
 
     #[test]
-    fn push_to_frame_moves_items_to_frame() {
-        let mut s: Stack<u8> = Stack::new();
-        s.extend([1, 2, 3, 4]);
-        s.push_to_frame(2);
-        assert_eq!(s.len(), 4);
-        assert_eq!(s.len_scratch(), 2);
-        assert_eq!(s.depth(1), 3);
-        assert_eq!(s.depth(2), 2);
-    }
-
-    #[test]
-    fn pop_from_frame_clears_index() {
-        let mut s: Stack<u8> = Stack::new();
-        s.extend([1, 2, 3]);
-        s.push_to_frame(2);
-        s.pop_from_frame(1);
-        assert_eq!(s.len_scratch(), 2);
-        assert_eq!(s.depth(2), 1);
-        assert_eq!(s.depth(3), 0);
-        s.swap(1);
-        assert_eq!(s.depth(2), 0);
-        assert_eq!(s.depth(3), 1);
-    }
-
-    #[test]
-    fn drain_scratch_leaves_frame_intact() {
-        let mut s: Stack<u8> = Stack::new();
-        s.extend([1, 2, 3, 4]);
-        s.push_to_frame(2);
-        let drained: Vec<_> = s.drain_scratch().collect();
-        assert_eq!(drained, vec![3, 4]);
-        assert_eq!(s.len(), 2);
-        assert_eq!(s.len_scratch(), 0);
-    }
-
-    #[test]
     fn swap_zero_is_noop() {
         let mut s: Stack<u8> = Stack::new();
         s.extend([1, 2]);
         s.swap(0);
-        assert_eq!(s.read(0), 2);
-        assert_eq!(s.read(1), 1);
+        assert_eq!(s.read(0), Some(2));
+        assert_eq!(s.read(1), Some(1));
     }
 
     #[test]
@@ -220,14 +171,66 @@ mod tests {
         s.extend([1, 2]);
         s.push(None);
         s.swap(2);
-        assert_eq!(s.read(0), 1);
+        assert_eq!(s.read(0), Some(1));
     }
 
     #[test]
-    #[should_panic]
-    fn push_to_frame_panics_on_none() {
+    fn pop_checkpoint_restores_swapped_values() {
         let mut s: Stack<u8> = Stack::new();
-        s.push(None);
-        s.push_to_frame(1);
+        s.extend([1, 2, 3]);
+        s.push_checkpoint();
+        s.swap(2);
+        s.pop_checkpoint();
+        assert_eq!(s.len(), 3);
+        assert_eq!(s.read(0), Some(3));
+        assert_eq!(s.read(1), Some(2));
+        assert_eq!(s.read(2), Some(1));
     }
+
+    #[test]
+    fn pop_checkpoint_restores_popped_values() {
+        let mut s: Stack<u8> = Stack::new();
+        s.extend([1, 2, 3]);
+        s.push_checkpoint();
+        s.popn(2);
+        s.pop_checkpoint();
+        assert_eq!(s.len(), 3);
+        assert_eq!(s.read(0), Some(3));
+        assert_eq!(s.read(1), Some(2));
+        assert_eq!(s.read(2), Some(1));
+    }
+
+    #[test]
+    fn pop_checkpoint_discards_pushed_values() {
+        let mut s: Stack<u8> = Stack::new();
+        s.extend([1, 2]);
+        s.push_checkpoint();
+        s.push(Some(3));
+        s.push(None);
+        s.pop_checkpoint();
+        assert_eq!(s.len(), 2);
+        assert_eq!(s.read(0), Some(2));
+        assert_eq!(s.read(1), Some(1));
+    }
+
+    #[test]
+    fn nested_checkpoints_restore_in_lifo_order() {
+        let mut s: Stack<u8> = Stack::new();
+        s.extend([1, 2, 3]);
+        s.push_checkpoint();
+        s.swap(2);
+        s.push_checkpoint();
+        s.popn(1);
+        s.pop_checkpoint();
+        assert_eq!(s.len(), 3);
+        assert_eq!(s.read(0), Some(1));
+        assert_eq!(s.read(1), Some(2));
+        assert_eq!(s.read(2), Some(3));
+        s.pop_checkpoint();
+        assert_eq!(s.len(), 3);
+        assert_eq!(s.read(0), Some(3));
+        assert_eq!(s.read(1), Some(2));
+        assert_eq!(s.read(2), Some(1));
+    }
+
 }

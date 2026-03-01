@@ -1,5 +1,5 @@
 use std::{collections::{HashMap, HashSet, hash_map::Entry}, hash::Hash};
-use crate::graph::{EntryNode, Graph, Idx, NodeOrdering, Predecessors, Successors, Tree, idom, dfs_intervals};
+use crate::graph::{EntryNode, Graph, Idx, NodeOrdering, Predecessors, Successors, Tree, dfs_intervals};
 use crate::utils::BitSet;
 
 pub trait Procedure {
@@ -138,6 +138,7 @@ impl<V: Copy + Eq + Hash> Pinning<V> {
 pub fn pinning<P: Procedure>(
     proc: &P,
     postorder: &impl NodeOrdering<P::BlockId>,
+    dom_tree: &Tree<P::BlockId>,
     liveness: &[BlockLiveness<P::VarId>],
 ) -> Box<[Pinning<P::VarId>]>
 where
@@ -146,8 +147,7 @@ where
     let cfg = proc.cfg();
     let n = cfg.node_count();
 
-    let dom_tree = Tree::new(cfg.entry(), idom(&cfg, postorder));
-    let dom_intervals = dfs_intervals(&dom_tree);
+    let dom_intervals = dfs_intervals(dom_tree);
     let dominates = |a: P::BlockId, b: P::BlockId| {
         let ra = &dom_intervals[a.index()];
         let rb = &dom_intervals[b.index()];
@@ -222,7 +222,7 @@ where
 mod tests {
     use super::*;
 
-    use crate::graph::tests::TestGraph;
+    use crate::graph::{Tree, idom, tests::TestGraph};
 
     struct TestProcedure<V: 'static> {
         cfg: TestGraph,
@@ -408,7 +408,8 @@ mod tests {
         );
         let postorder = proc.cfg.postorder();
         let live = liveness(&proc, postorder);
-        let result = pinning(&proc, postorder, &live);
+        let dom_tree = Tree::new(proc.cfg.entry(), idom(&proc.cfg, postorder));
+        let result = pinning(&proc, postorder, &dom_tree, &live);
 
         assert!(!result[0].is_pinned_out("x"));
         assert!(!result[0].is_pinned("x"));
@@ -432,7 +433,8 @@ mod tests {
         );
         let postorder = proc.cfg.postorder();
         let live = liveness(&proc, postorder);
-        let result = pinning(&proc, postorder, &live);
+        let dom_tree = Tree::new(proc.cfg.entry(), idom(&proc.cfg, postorder));
+        let result = pinning(&proc, postorder, &dom_tree, &live);
 
         assert!(!result[4].is_pinned_out("x"));
         assert!(!result[4].is_pinned("x"));
