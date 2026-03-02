@@ -36,28 +36,48 @@ fn lower_expr(
         ast::Expr::Unit => core::Expr::Unit,
         ast::Expr::Val(v) => core::Expr::Val(lower_val(v)),
         ast::Expr::Op(op, args) => {
-            core::Expr::Op(op, args.into_iter().map(lower_val).collect())
+            core::Expr::Op(op, args.into_iter().map(|arg| lower_expr_to_val(arg, priors, ids)).collect())
         }
         ast::Expr::Apply(f, args) => {
-            core::Expr::Apply(f, args.into_iter().map(lower_val).collect())
+            core::Expr::Apply(f, args.into_iter().map(|arg| lower_expr_to_val(arg, priors, ids)).collect())
         }
         ast::Expr::IfThenElse(cond_then_else) => {
             let (cond, then_else) = *cond_then_else;
-            let cond = match lower_expr(cond, priors, ids) {
-                core::Expr::Val(core::Val::Var(x)) => x,
-                expr => {
-                    let x = ids.generate();
-                    priors.push((Some(x), expr));
-                    x
-                }
-            };
+            let cond = lower_expr_to_var(cond, priors, ids);
             let [then_block, else_block] = then_else;
             let then_block = lower_block(then_block, ids);
             let else_block = lower_block(else_block, ids);
-            core::Expr::IfThenElse(
-                cond,
-                Box::new([then_block, else_block]),
-            )
+            core::Expr::IfThenElse(cond, Box::new([then_block, else_block]))
+        }
+    }
+}
+
+fn lower_expr_to_val(
+    expr: ast::Expr<Id>,
+    priors: &mut Vec<(Option<Id>, core::Expr)>,
+    ids: &mut IdGen,
+) -> core::Val {
+    match lower_expr(expr, priors, ids) {
+        core::Expr::Val(val) => val,
+        expr => {
+            let x = ids.generate();
+            priors.push((Some(x), expr));
+            core::Val::Var(x)
+        }
+    }
+}
+
+fn lower_expr_to_var(
+    expr: ast::Expr<Id>,
+    priors: &mut Vec<(Option<Id>, core::Expr)>,
+    ids: &mut IdGen,
+) -> Id {
+    match lower_expr_to_val(expr, priors, ids) {
+        core::Val::Var(x) => x,
+        core::Val::Const(c) => {
+            let x = ids.generate();
+            priors.push((Some(x), core::Expr::Val(core::Val::Const(c))));
+            x
         }
     }
 }

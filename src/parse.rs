@@ -33,7 +33,8 @@ pub fn parse(source: &str) -> Result<ast::Program<&str>> {
                             .ok_or_else(|| Rich::custom(span, format!("unknown opcode {opcode_name}")))
                     })
                     .then(
-                        val.separated_by(just(','))
+                        expr.clone()
+                            .separated_by(just(','))
                             .collect::<Vec<_>>()
                             .delimited_by(just('('), just(')'))
                     )
@@ -41,7 +42,8 @@ pub fn parse(source: &str) -> Result<ast::Program<&str>> {
 
                 let expr_apply = text::ident()
                     .then(
-                        val.separated_by(just(','))
+                        expr.clone()
+                            .separated_by(just(','))
                             .collect::<Vec<_>>()
                             .delimited_by(just('('), just(')'))
                     )

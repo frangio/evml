@@ -68,12 +68,12 @@ fn resolve_expr(
         Expr::Unit => Expr::Unit,
         Expr::Val(v) => Expr::Val(resolve_val(v, env)?),
         Expr::Op(op, args) => {
-            let args = args.iter().map(|val| resolve_val(val, env)).collect::<Result<_>>()?;
+            let args = args.iter().map(|expr| resolve_expr(expr, ids, env)).collect::<Result<_>>()?;
             Expr::Op(*op, args)
         }
         Expr::Apply(f, args) => {
             let f = *env.get(f).with_context(|| format!("unbound procedure {f}"))?;
-            let args = args.iter().map(|val| resolve_val(val, env)).collect::<Result<_>>()?;
+            let args = args.iter().map(|expr| resolve_expr(expr, ids, env)).collect::<Result<_>>()?;
             Expr::Apply(f, args)
         }
         Expr::IfThenElse(cond_then_else) => {

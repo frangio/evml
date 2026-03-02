@@ -37,8 +37,8 @@ pub mod ast {
     pub enum Expr<T> {
         Unit,
         Val(Val<T>),
-        Op(u8, Box<[Val<T>]>),
-        Apply(T, Box<[Val<T>]>),
+        Op(u8, Box<[Expr<T>]>),
+        Apply(T, Box<[Expr<T>]>),
         IfThenElse(Box<(Expr<T>, [Block<T>; 2])>),
     }
 
@@ -229,6 +229,37 @@ mod tests {
             fn add(a, b, c) -> u256 {
                 let r = @add(a, b);
                 @add(r, c)
+            }
+        "#);
+    }
+
+    #[test]
+    fn test_e2e_op_args_eval_left_to_right() {
+        assert_e2e_result(U256::from(12), r#"
+            fn main() -> u256 {
+                let _ = @mstore(0, 5);
+                @add(store_and_return_old(7), store_and_return_old(11))
+            }
+            fn store_and_return_old(x) -> u256 {
+                let old = @mload(0);
+                let _ = @mstore(0, x);
+                old
+            }
+        "#);
+    }
+
+    #[test]
+    fn test_e2e_apply_args_eval_left_to_right() {
+        assert_e2e_result(U256::from(12), r#"
+            fn main() -> u256 {
+                let _ = @mstore(0, 5);
+                add(store_and_return_old(7), store_and_return_old(11))
+            }
+            fn add(a, b) -> u256 { @add(a, b) }
+            fn store_and_return_old(x) -> u256 {
+                let old = @mload(0);
+                let _ = @mstore(0, x);
+                old
             }
         "#);
     }

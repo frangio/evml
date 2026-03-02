@@ -44,11 +44,17 @@ fn type_check_block(block: &ast::Block<Id>, mut env: HashMap<Id, Type>) -> Resul
 
 fn type_check_expr(expr: &ast::Expr<Id>, env: &HashMap<Id, Type>) -> Result<usize> {
     use crate::ast::*;
+
     let type_check_val = |v: &Val<Id>| -> Result<usize> {
         if let Val::Var(x) = v {
             ensure!(env.get(x).copied() == Some(Type::Val), "variable is not a value");
         }
         Ok(1)
+    };
+
+    let type_check_arg = |expr: &Expr<Id>| -> Result<()> {
+        ensure!(type_check_expr(expr, env)? == 1, "argument expression must produce one value");
+        Ok(())
     };
 
     match expr {
@@ -60,7 +66,7 @@ fn type_check_expr(expr: &ast::Expr<Id>, env: &HashMap<Id, Type>) -> Result<usiz
             let Some(info) = opcodes::info(*op) else { bail!("unknown opcode {op:#04x?}") };
             ensure!(args.len() == info.inputs);
             for arg in args {
-                type_check_val(arg)?;
+                type_check_arg(arg)?;
             }
             Ok(info.outputs)
         }
@@ -71,7 +77,7 @@ fn type_check_expr(expr: &ast::Expr<Id>, env: &HashMap<Id, Type>) -> Result<usiz
             };
             ensure!(args.len() == expected_args, "wrong number of arguments");
             for arg in args {
-                type_check_val(arg)?;
+                type_check_arg(arg)?;
             }
             Ok(rets)
         }
@@ -104,7 +110,7 @@ mod tests {
                 rets: 1,
                 body: Block {
                     priors: vec![],
-                    tail: Op(0x04, Box::new([Const(U256::from(84)), Const(U256::from(2))])),
+                    tail: Op(0x04, Box::new([Val(Const(U256::from(84))), Val(Const(U256::from(2)))])),
                 },
             })],
         };
@@ -122,7 +128,7 @@ mod tests {
                 rets: 1,
                 body: Block {
                     priors: vec![],
-                    tail: Op(0x04, Box::new([Const(U256::from(84))])),
+                    tail: Op(0x04, Box::new([Val(Const(U256::from(84)))])),
                 },
             })],
         };
@@ -139,12 +145,37 @@ mod tests {
                 args: Box::new([]),
                 rets: 0,
                 body: Block {
-                    priors: vec![
-                        (Some(x), Op(0x50, Box::new([Const(U256::from(42))]))),
-                    ],
+                    priors: vec![(Some(x), Op(0x50, Box::new([Val(Const(U256::from(42)))])))],
                     tail: Val(Const(U256::from(0))),
                 },
             })],
+        };
+        assert!(type_check(&program).is_err());
+    }
+
+    #[test]
+    fn test_type_check_rejects_void_arg_expr() {
+        use super::ast::{Block, Expr::*, Proc, Program, Val::*};
+        let mut ids = IdGen::new();
+        generate_ids! { main in ids };
+        let program = Program {
+            procs: vec![(
+                main,
+                Proc {
+                    args: Box::new([]),
+                    rets: 1,
+                    body: Block {
+                        priors: vec![],
+                        tail: Op(
+                            0x01,
+                            Box::new([
+                                Op(0x50, Box::new([Val(Const(U256::from(42)))])),
+                                Val(Const(U256::from(1))),
+                            ]),
+                        ),
+                    },
+                },
+            )],
         };
         assert!(type_check(&program).is_err());
     }
