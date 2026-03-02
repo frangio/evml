@@ -1,7 +1,8 @@
 use std::collections::{HashMap, VecDeque};
-use std::iter::chain;
+use std::iter::{chain, zip};
 use std::mem::{replace, take};
 use std::num::NonZero;
+use std::ops::Range;
 use std::slice;
 
 use crate::utils::exact_size_chain;
@@ -138,19 +139,36 @@ fn compile_cont(
     use asm::*;
     use core::*;
 
-    let mut popped = 0;
-    for d in 0..stack.len() {
-        let d = d - popped;
-        let Some(x) = stack.read(d) else { continue };
-        let is_cont_last_use = last_use.get(&x) == Some(&InstrIdx::Cont);
-        if !liveness.live_out(x) && !is_cont_last_use {
-            if d > 0 {
-                code.push(Instr::Swap(d));
-                stack.swap(d);
+    let mut move_candidates = collect_cont_move_candidates(stack, liveness, pinning, last_use);
+
+    while let Some((from_kind, from_index)) = move_candidates.next() {
+        if from_kind == ContMoveKind::Dead {
+            let top_index = stack.len() - 1;
+            if from_index < top_index {
+                let from_depth = top_index - from_index;
+                code.push(Instr::Swap(from_depth));
+                stack.swap(from_depth);
             }
             code.push(Instr::Pop);
             stack.popn(1);
-            popped += 1;
+        } else if from_kind == ContMoveKind::PinOut
+            && let Some((to_kind, to_index)) =
+                move_candidates.rfind(|&(k, _)| k != ContMoveKind::PinOut)
+        {
+            debug_assert!(to_index < from_index);
+            let top_index = stack.len() - 1;
+            if from_index < top_index {
+                let from_depth = top_index - from_index;
+                code.push(Instr::Swap(from_depth));
+                stack.swap(from_depth);
+            }
+            let to_depth = top_index - to_index;
+            code.push(Instr::Swap(to_depth));
+            stack.swap(to_depth);
+            if to_kind == ContMoveKind::Dead {
+                code.push(Instr::Pop);
+                stack.popn(1);
+            }
         }
     }
 
@@ -199,12 +217,8 @@ fn compile_expr_onto(
     use core::*;
     use asm::*;
     match expr {
-        Expr::Val(val @ Val::Const(_)) => {
-            compile_val_onto(val, stack, is_last_use, true, code);
-        }
-
-        Expr::Val(val @ Val::Var(_)) => {
-            let may_swap = !is_stack_top_pinned(stack, pinning);
+        Expr::Val(val) => {
+            let may_swap = matches!(val, Val::Const(_)) || !is_stack_top_pinned(stack, pinning);
             compile_val_onto(val, stack, is_last_use, may_swap, code);
         }
 
@@ -227,6 +241,75 @@ fn compile_expr_onto(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ContMoveKind {
+    PinOut,
+    Unpinned,
+    Dead,
+}
+
+fn collect_cont_move_candidates(
+    stack: &Stack<Id>,
+    liveness: &BlockLiveness,
+    pinning: &BlockPinning,
+    last_use: &HashMap<Id, InstrIdx>,
+) -> impl DoubleEndedIterator<Item = (ContMoveKind, usize)> + use<> {
+    struct Segment {
+        kind: ContMoveKind,
+        range: Range<usize>,
+    }
+
+    let mut segments: Vec<Segment> = vec![];
+    let mut unmatched_pinouts = 0usize;
+    let mut below_pinned_through = false;
+
+    for (index, &slot) in stack.contents().iter().enumerate().rev() {
+        if below_pinned_through && unmatched_pinouts == 0 {
+            break;
+        }
+
+        let kind = match slot {
+            Some(x) if pinning.is_pinned_through(x) => {
+                below_pinned_through = true;
+                continue;
+            }
+            Some(x) if pinning.is_pinned_out(x) => {
+                if below_pinned_through {
+                    continue;
+                }
+                unmatched_pinouts += 1;
+                ContMoveKind::PinOut
+            }
+            _ => {
+                if below_pinned_through {
+                    unmatched_pinouts -= 1;
+                }
+                if let Some(x) = slot && (liveness.live_out(x) || last_use.get(&x) == Some(&InstrIdx::Cont)) {
+                    ContMoveKind::Unpinned
+                } else {
+                    ContMoveKind::Dead
+                }
+            }
+        };
+
+        if let Some(segment) = segments.last_mut()
+            && segment.kind == kind
+            && segment.range.start == index + 1
+        {
+            segment.range.start = index;
+        } else {
+            segments.push(Segment {
+                kind,
+                range: index..index + 1,
+            });
+        }
+    }
+
+    segments
+        .into_iter()
+        .flat_map(|segment| segment.range.rev().map(move |i| (segment.kind, i)))
+}
+
 fn compile_args_onto(
     args: &[core::Val],
     ret_label: Option<Id>,
@@ -247,7 +330,7 @@ fn compile_args_onto(
         .count();
 
     let may_swap = (0..move_count)
-        .all(|depth| stack.read(depth).is_none_or(|x| !pinning.is_pinned(x)));
+        .all(|depth| stack.read(depth).is_none_or(|x| !pinning.is_pinned_through(x)));
 
     let stack_delta = if may_swap {
         args.len() - move_count
@@ -320,7 +403,7 @@ type BlockLiveness = analysis::BlockLiveness<Id>;
 type BlockPinning = analysis::Pinning<Id>;
 
 fn is_stack_top_pinned(stack: &Stack<Id>, pinning: &BlockPinning) -> bool {
-    stack.read(0).is_some_and(|y| pinning.is_pinned(y))
+    stack.read(0).is_some_and(|y| pinning.is_pinned_through(y))
 }
 
 fn analyze(proc: &ProcCfg) -> ProcAnalysis {

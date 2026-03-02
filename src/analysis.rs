@@ -122,10 +122,10 @@ pub struct Pinning<V> {
 
 impl<V: Copy + Eq + Hash> Pinning<V> {
     pub fn is_pinned_out(&self, var: V) -> bool {
-        self.pinned.contains_key(&var)
+        self.pinned.get(&var) == Some(&PinState::PinOut)
     }
 
-    pub fn is_pinned(&self, var: V) -> bool {
+    pub fn is_pinned_through(&self, var: V) -> bool {
         self.pinned.get(&var) == Some(&PinState::PinThrough)
     }
 }
@@ -412,11 +412,11 @@ mod tests {
         let result = pinning(&proc, postorder, &dom_tree, &live);
 
         assert!(!result[0].is_pinned_out("x"));
-        assert!(!result[0].is_pinned("x"));
+        assert!(!result[0].is_pinned_through("x"));
         assert!(!result[1].is_pinned_out("x"));
-        assert!(!result[1].is_pinned("x"));
+        assert!(!result[1].is_pinned_through("x"));
         assert!(!result[2].is_pinned_out("x"));
-        assert!(!result[2].is_pinned("x"));
+        assert!(!result[2].is_pinned_through("x"));
     }
 
     #[test]
@@ -437,14 +437,14 @@ mod tests {
         let result = pinning(&proc, postorder, &dom_tree, &live);
 
         assert!(!result[4].is_pinned_out("x"));
-        assert!(!result[4].is_pinned("x"));
+        assert!(!result[4].is_pinned_through("x"));
         assert!(result[0].is_pinned_out("x"));
-        assert!(!result[0].is_pinned("x"));
-        assert!(result[1].is_pinned_out("x"));
-        assert!(result[1].is_pinned("x"));
-        assert!(result[2].is_pinned_out("x"));
-        assert!(result[2].is_pinned("x"));
+        assert!(!result[0].is_pinned_through("x"));
+        assert!(!result[1].is_pinned_out("x"));
+        assert!(result[1].is_pinned_through("x"));
+        assert!(!result[2].is_pinned_out("x"));
+        assert!(result[2].is_pinned_through("x"));
         assert!(!result[3].is_pinned_out("x"));
-        assert!(!result[3].is_pinned("x"));
+        assert!(!result[3].is_pinned_through("x"));
     }
 }

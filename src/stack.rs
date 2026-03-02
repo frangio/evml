@@ -85,7 +85,7 @@ impl<T: Copy + Eq + Hash> Stack<T> {
         }
     }
 
-    fn contents(&self) -> &[Option<T>] {
+    pub fn contents(&self) -> &[Option<T>] {
         &self.contents
     }
 }
