@@ -1,0 +1,48 @@
+fn main() -> u256 {
+  gcd(270, 192)
+}
+
+fn gcd(a, b) -> u256 {
+  let a_is_zero = @eq(a, 0);
+  if a_is_zero {
+    b
+  } else {
+    let b_is_zero = @eq(b, 0);
+    if b_is_zero {
+      a
+    } else {
+      let a_lowbit = @and(a, 1);
+      let a_even = @eq(a_lowbit, 0);
+      let b_lowbit = @and(b, 1);
+      let b_even = @eq(b_lowbit, 0);
+
+      if a_even {
+        if b_even {
+          let a_half = @shr(1, a);
+          let b_half = @shr(1, b);
+          let g = gcd(a_half, b_half);
+          @shl(1, g)
+        } else {
+          let a_half = @shr(1, a);
+          gcd(a_half, b)
+        }
+      } else {
+        if b_even {
+          let b_half = @shr(1, b);
+          gcd(a, b_half)
+        } else {
+          let a_gt_b = @gt(a, b);
+          if a_gt_b {
+            let d = @sub(a, b);
+            let d_half = @shr(1, d);
+            gcd(d_half, b)
+          } else {
+            let d = @sub(b, a);
+            let d_half = @shr(1, d);
+            gcd(d_half, a)
+          }
+        }
+      }
+    }
+  }
+}

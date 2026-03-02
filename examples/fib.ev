@@ -1,0 +1,15 @@
+fn main() -> u256 {
+  fib(9)
+}
+
+fn fib(n) -> u256 {
+  if @lt(n, 2) {
+    n
+  } else {
+    let n_1 = @sub(n, 1);
+    let n_2 = @sub(n, 2);
+    let a = fib(n_1);
+    let b = fib(n_2);
+    @add(a, b)
+  }
+}

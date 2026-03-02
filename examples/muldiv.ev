@@ -1,0 +1,74 @@
+fn main() -> u256 {
+  muldiv(
+    340282366920938463463374607431768211579,
+    340282366920938463463374607431768211501,
+    5
+  )
+}
+
+fn muldiv(x, y, denominator) -> u256 {
+  let max = @not(0);
+  let mm = @mulmod(x, y, max);
+  let low = @mul(x, y);
+  let mm_lt_low = @lt(mm, low);
+  let mm_minus_low = @sub(mm, low);
+  let high = @sub(mm_minus_low, mm_lt_low);
+
+  let high_is_zero = @eq(high, 0);
+  if high_is_zero {
+    @div(low, denominator)
+  } else {
+    let denominator_gt_high = @gt(denominator, high);
+    if denominator_gt_high {
+      let remainder = @mulmod(x, y, denominator);
+      let remainder_gt_low = @gt(remainder, low);
+      let high_exact = @sub(high, remainder_gt_low);
+      let low_exact = @sub(low, remainder);
+
+      let neg_denominator = @sub(0, denominator);
+      let twos = @and(denominator, neg_denominator);
+
+      let denominator_odd = @div(denominator, twos);
+      let low_div_twos = @div(low_exact, twos);
+
+      let neg_twos = @sub(0, twos);
+      let twos_quot = @div(neg_twos, twos);
+      let twos_flipped = @add(twos_quot, 1);
+
+      let shifted_high = @mul(high_exact, twos_flipped);
+      let low_combined = @or(low_div_twos, shifted_high);
+
+      let inverse_seed_mul = @mul(3, denominator_odd);
+      let inverse_0 = @xor(inverse_seed_mul, 2);
+
+      let prod_1 = @mul(denominator_odd, inverse_0);
+      let corr_1 = @sub(2, prod_1);
+      let inverse_1 = @mul(inverse_0, corr_1);
+
+      let prod_2 = @mul(denominator_odd, inverse_1);
+      let corr_2 = @sub(2, prod_2);
+      let inverse_2 = @mul(inverse_1, corr_2);
+
+      let prod_3 = @mul(denominator_odd, inverse_2);
+      let corr_3 = @sub(2, prod_3);
+      let inverse_3 = @mul(inverse_2, corr_3);
+
+      let prod_4 = @mul(denominator_odd, inverse_3);
+      let corr_4 = @sub(2, prod_4);
+      let inverse_4 = @mul(inverse_3, corr_4);
+
+      let prod_5 = @mul(denominator_odd, inverse_4);
+      let corr_5 = @sub(2, prod_5);
+      let inverse_5 = @mul(inverse_4, corr_5);
+
+      let prod_6 = @mul(denominator_odd, inverse_5);
+      let corr_6 = @sub(2, prod_6);
+      let inverse_6 = @mul(inverse_5, corr_6);
+
+      let result = @mul(low_combined, inverse_6);
+      result
+    } else {
+      0
+    }
+  }
+}
