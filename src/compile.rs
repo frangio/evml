@@ -37,7 +37,7 @@ fn compile_proc(
     let mut block_code: Box<[Vec<asm::Instr>]> = vec![vec![]; proc.blocks.len()].into_boxed_slice();
 
     let mut stack = Stack::new();
-    stack.extend(args.iter().copied());
+    stack.extend(args.iter().copied().rev());
 
     let dom_tree = analysis.dom_tree();
     for visit in dfs(dom_tree) {
