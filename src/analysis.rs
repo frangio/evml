@@ -46,10 +46,6 @@ impl<V: Copy + Eq + Hash> BlockLiveness<V> {
         self.vars.iter().filter_map(|(&var, info)| info.live_in.then_some(var))
     }
 
-    pub fn live_out_vars(&self) -> impl Iterator<Item = V> + '_ {
-        self.vars.iter().filter_map(|(&var, info)| info.live_out.then_some(var))
-    }
-
     pub fn used_count(&self) -> usize {
         self.used_count
     }
@@ -287,7 +283,7 @@ mod tests {
         // 0: def x; use x
         let proc =
             TestProcedure::with_nodes(1, &[], &[(0, instructions! { def ["x"]; use ["x"] })]);
-        let result = liveness(&proc, proc.cfg.postorder());
+        let result = liveness(&proc, &proc.cfg.postorder());
         let a = &result[0];
         assert!(!a.live_in("x"));
         assert!(!a.live_out("x"));
@@ -303,7 +299,7 @@ mod tests {
                 (1, instructions! { use ["y"] }),
             ],
         );
-        let result = liveness(&proc, proc.cfg.postorder());
+        let result = liveness(&proc, &proc.cfg.postorder());
         let a = &result[0];
         assert!(!a.live_in("x"));
         assert!(!a.live_out("x"));
@@ -328,7 +324,7 @@ mod tests {
                 (3, instructions! { use ["x"] }),
             ],
         );
-        let result = liveness(&proc, proc.cfg.postorder());
+        let result = liveness(&proc, &proc.cfg.postorder());
         assert!(!result[0].live_in("x"));
         assert!(result[0].live_out("x"));
         assert!(result[1].live_in("x"));
@@ -349,7 +345,7 @@ mod tests {
                 (2, instructions! { use ["x"] }),
             ],
         );
-        let result = liveness(&proc, proc.cfg.postorder());
+        let result = liveness(&proc, &proc.cfg.postorder());
         assert!(!result[1].live_in("x"));
         assert!(result[1].live_out("x"));
         assert!(result[2].live_in("x"));
@@ -361,7 +357,7 @@ mod tests {
         // 0: def x; use x
         let proc =
             TestProcedure::with_nodes(1, &[], &[(0, instructions! { def ["x"] ; use ["x"] })]);
-        let result = liveness(&proc, proc.cfg.postorder());
+        let result = liveness(&proc, &proc.cfg.postorder());
         assert!(!result[0].live_in("x"));
         assert!(!result[0].live_out("x"));
     }
@@ -376,7 +372,7 @@ mod tests {
                 (1, instructions! { use ["x"] }),
             ],
         );
-        let result = liveness(&proc, proc.cfg.postorder());
+        let result = liveness(&proc, &proc.cfg.postorder());
         assert!(!result[0].live_in("x"));
         assert!(result[0].live_out("x"));
         assert!(result[1].live_in("x"));
@@ -391,7 +387,7 @@ mod tests {
             &[],
             &[(0, instructions! { def ["x"]; use ["x"]; use ["x"] })],
         );
-        let result = liveness(&proc, proc.cfg.postorder());
+        let result = liveness(&proc, &proc.cfg.postorder());
         assert!(!result[0].live_in("x"));
         assert!(!result[0].live_out("x"));
     }
@@ -407,9 +403,9 @@ mod tests {
             ],
         );
         let postorder = proc.cfg.postorder();
-        let live = liveness(&proc, postorder);
-        let dom_tree = Tree::new(proc.cfg.entry(), idom(&proc.cfg, postorder));
-        let result = pinning(&proc, postorder, &dom_tree, &live);
+        let live = liveness(&proc, &postorder);
+        let dom_tree = Tree::new(proc.cfg.entry(), idom(&proc.cfg, &postorder));
+        let result = pinning(&proc, &postorder, &dom_tree, &live);
 
         assert!(!result[0].is_pinned_out("x"));
         assert!(!result[0].is_pinned_through("x"));
@@ -432,9 +428,9 @@ mod tests {
             ],
         );
         let postorder = proc.cfg.postorder();
-        let live = liveness(&proc, postorder);
-        let dom_tree = Tree::new(proc.cfg.entry(), idom(&proc.cfg, postorder));
-        let result = pinning(&proc, postorder, &dom_tree, &live);
+        let live = liveness(&proc, &postorder);
+        let dom_tree = Tree::new(proc.cfg.entry(), idom(&proc.cfg, &postorder));
+        let result = pinning(&proc, &postorder, &dom_tree, &live);
 
         assert!(!result[4].is_pinned_out("x"));
         assert!(!result[4].is_pinned_through("x"));

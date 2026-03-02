@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::iter::{chain, zip};
+use std::iter::chain;
 use std::mem::{replace, take};
 use std::num::NonZero;
 use std::ops::Range;

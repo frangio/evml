@@ -41,35 +41,6 @@ pub trait NodeOrdering<N> {
     fn iter(&self) -> impl DoubleEndedIterator<Item = N> + ExactSizeIterator;
 }
 
-pub struct ArrayNodeOrdering<N: Idx> {
-    nodes: Box<[N]>,
-    positions: Box<[usize]>,
-}
-
-impl<N: Idx> ArrayNodeOrdering<N> {
-    pub fn new(nodes: Box<[N]>) -> Self {
-        let mut positions = vec![0; nodes.len()].into_boxed_slice();
-        for (pos, &node) in nodes.iter().enumerate() {
-            positions[node.index()] = pos;
-        }
-        Self { nodes, positions }
-    }
-}
-
-impl<N: Idx> NodeOrdering<N> for ArrayNodeOrdering<N> {
-    fn position(&self, node: N) -> usize {
-        self.positions[node.index()]
-    }
-
-    fn node_at(&self, position: usize) -> N {
-        self.nodes[position]
-    }
-
-    fn iter(&self) -> impl DoubleEndedIterator<Item = N> + ExactSizeIterator {
-        self.nodes.iter().copied()
-    }
-}
-
 impl<G: Graph + ?Sized> Graph for &G {
     type Node = G::Node;
 
@@ -163,14 +134,14 @@ pub fn dfs<G: EntryNode + Successors>(g: &G) -> DFS<'_, G> {
 pub struct DFS<'a, G: Graph + ?Sized> {
     graph: &'a G,
     flags: BitSet,
-    buffer: ShiftStack<G::Node>,
+    buffer: Vec<G::Node>,
 }
 
 impl<'a, G: EntryNode + Successors> DFS<'a, G> {
     fn new(graph: &'a G) -> Self {
         let n = graph.node_count();
         let mut flags = BitSet::new(2 * n);
-        let mut buffer = ShiftStack::new(n);
+        let mut buffer = Vec::with_capacity(n);
 
         let entry = graph.entry();
         flags.insert(2 * entry.index() + 1);
@@ -184,7 +155,7 @@ impl<G: EntryNode + Successors> Iterator for DFS<'_, G> {
     type Item = DFSVisit<G::Node>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let &node = self.buffer.top()?;
+        let &node = self.buffer.last()?;
         if self.flags.insert(2 * node.index()) {
             for succ in self.graph.successors(node) {
                 if self.flags.insert(2 * succ.index() + 1) {
@@ -193,7 +164,7 @@ impl<G: EntryNode + Successors> Iterator for DFS<'_, G> {
             }
             Some(DFSVisit { node, exit: false })
         } else {
-            self.buffer.shift();
+            self.buffer.pop();
             Some(DFSVisit { node, exit: true })
         }
     }
@@ -364,41 +335,8 @@ pub fn predecessor_edges<G: Successors>(g: G) -> EdgeArray<G::Node> {
     }
 }
 
-pub fn cache_predecessors<G: Successors>(g: G) -> CachedPredecessors<G> {
-    let preds = predecessor_edges(&g);
-    CachedPredecessors { inner: g, preds }
-}
-
-pub struct CachedPredecessors<G: Graph> {
-    inner: G,
-    preds: EdgeArray<G::Node>,
-}
-
-impl<G: Graph> Graph for CachedPredecessors<G> {
-    type Node = G::Node;
-
-    fn node_count(&self) -> usize {
-        self.inner.node_count()
-    }
-
-    fn nodes(&self) -> impl Iterator<Item = Self::Node> {
-        self.inner.nodes()
-    }
-}
-
-impl<G: Successors> Successors for CachedPredecessors<G> {
-    fn successors(&self, node: Self::Node) -> impl Iterator<Item = Self::Node> {
-        self.inner.successors(node)
-    }
-}
-
-impl<G: Graph> Predecessors for CachedPredecessors<G> {
-    fn predecessors(&self, node: G::Node) -> impl Iterator<Item = G::Node> {
-        self.preds.edges_from(node)
-    }
-}
-
-pub fn postorder<G: EntryNode + Successors>(g: G) -> ArrayNodeOrdering<G::Node> {
+#[allow(unused)]
+pub fn postorder<G: EntryNode + Successors>(g: G) -> Box<[G::Node]> {
     let n = g.node_count();
 
     let mut flags = BitSet::new(2 * n);
@@ -423,7 +361,7 @@ pub fn postorder<G: EntryNode + Successors>(g: G) -> ArrayNodeOrdering<G::Node> 
         }
     }
 
-    ArrayNodeOrdering::new(buffer.into_boxed_slice())
+    buffer.into_boxed_slice()
 }
 
 #[cfg(test)]
@@ -435,7 +373,6 @@ pub mod tests {
         pub node_count: usize,
         pub edges: Vec<(usize, usize)>,
         entry: OnceCell<usize>,
-        postorder: OnceCell<ArrayNodeOrdering<usize>>,
     }
 
     impl TestGraph {
@@ -454,12 +391,37 @@ pub mod tests {
                 node_count,
                 edges,
                 entry: OnceCell::new(),
-                postorder: OnceCell::new(),
             }
         }
 
-        pub fn postorder(&self) -> &ArrayNodeOrdering<usize> {
-            self.postorder.get_or_init(|| postorder(self))
+        pub fn postorder(&self) -> impl NodeOrdering<usize> {
+            struct Postorder<N> {
+                nodes: Box<[N]>,
+                positions: Box<[usize]>,
+            }
+
+            impl<N: Idx> NodeOrdering<N> for Postorder<N> {
+                fn position(&self, node: N) -> usize {
+                    self.positions[node.index()]
+                }
+
+                fn node_at(&self, position: usize) -> N {
+                    self.nodes[position]
+                }
+
+                fn iter(&self) -> impl DoubleEndedIterator<Item = N> + ExactSizeIterator {
+                    self.nodes.iter().copied()
+                }
+            }
+
+            let nodes = postorder(self);
+
+            let mut positions = vec![0; self.node_count()].into_boxed_slice();
+            for (pos, &node) in nodes.iter().enumerate() {
+                positions[node.index()] = pos;
+            }
+
+            Postorder { nodes, positions }
         }
     }
 
@@ -504,7 +466,7 @@ pub mod tests {
     }
 
     #[test]
-    fn test_cache_predecessors() {
+    fn test_predecessor_edges() {
         // 0 → 1 → 2
         //     ↓
         //     3
@@ -513,12 +475,12 @@ pub mod tests {
             (1, 2),
             (1, 3),
         ]);
-        let cached = cache_predecessors(g);
+        let preds = predecessor_edges(&g);
 
-        let preds_0: Vec<_> = cached.predecessors(0).collect();
-        let preds_1: Vec<_> = cached.predecessors(1).collect();
-        let preds_2: Vec<_> = cached.predecessors(2).collect();
-        let preds_3: Vec<_> = cached.predecessors(3).collect();
+        let preds_0: Vec<_> = preds.edges_from(0).collect();
+        let preds_1: Vec<_> = preds.edges_from(1).collect();
+        let preds_2: Vec<_> = preds.edges_from(2).collect();
+        let preds_3: Vec<_> = preds.edges_from(3).collect();
 
         assert!(preds_0.is_empty());
         assert_eq!(preds_1, vec![0]);
@@ -554,10 +516,27 @@ pub mod tests {
     }
 
     #[test]
+    fn test_postorder_matches_dfs_exit_order() {
+        // 0 → 1 → 2
+        //   ↘ 3
+        let g = TestGraph::new(&[
+            (0, 1),
+            (1, 2),
+            (0, 3),
+        ]);
+
+        let expected: Vec<_> = dfs(&g)
+            .filter_map(|visit| visit.exit.then_some(visit.node))
+            .collect();
+
+        assert_eq!(&*postorder(&g), expected.as_slice());
+    }
+
+    #[test]
     fn test_idom_single_node() {
         // 0
         let g = TestGraph::with_nodes(1, &[]);
-        let result = idom(&g, g.postorder());
+        let result = idom(&g, &g.postorder());
         assert_eq!(result[0], None);
     }
 
@@ -568,7 +547,7 @@ pub mod tests {
             (0, 1),
             (1, 2),
         ]);
-        let result = idom(&g, g.postorder());
+        let result = idom(&g, &g.postorder());
         assert_eq!(result[0], None);
         assert_eq!(result[1], Some(0));
         assert_eq!(result[2], Some(1));
@@ -587,7 +566,7 @@ pub mod tests {
             (1, 3),
             (2, 3),
         ]);
-        let result = idom(&g, g.postorder());
+        let result = idom(&g, &g.postorder());
         assert_eq!(result[0], None);
         assert_eq!(result[1], Some(0));
         assert_eq!(result[2], Some(0));
@@ -604,7 +583,7 @@ pub mod tests {
             (1, 2),
             (2, 1),
         ]);
-        let result = idom(&g, g.postorder());
+        let result = idom(&g, &g.postorder());
         assert_eq!(result[0], None);
         assert_eq!(result[1], Some(0));
         assert_eq!(result[2], Some(1));
@@ -623,7 +602,7 @@ pub mod tests {
             (3, 2),
             (3, 1),
         ]);
-        let result = idom(&g, g.postorder());
+        let result = idom(&g, &g.postorder());
         assert_eq!(result[0], None);
         assert_eq!(result[1], Some(0));
         assert_eq!(result[2], Some(1));
@@ -641,7 +620,7 @@ pub mod tests {
             (1, 2),
             (2, 1),
         ]);
-        let result = idom(&g, g.postorder());
+        let result = idom(&g, &g.postorder());
         assert_eq!(result[0], None);
         assert_eq!(result[1], Some(0));
         assert_eq!(result[2], Some(0));

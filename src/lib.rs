@@ -1,5 +1,3 @@
-#![allow(unused)]
-
 mod runner;
 mod opcodes;
 mod graph;
