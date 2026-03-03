@@ -41,31 +41,27 @@ fn compile_proc(
 
     let dom_tree = analysis.dom_tree();
     for visit in dfs(dom_tree) {
-        let block_id = visit.node;
         if visit.exit {
             stack.pop_checkpoint();
             continue;
         }
         stack.push_checkpoint();
+
+        let block_id = visit.node;
+        let block = proc.block(block_id);
         let liveness = analysis.liveness(block_id);
         let pinning = analysis.pinning(block_id);
-        let last_use = build_last_use(&proc, block_id, liveness.used_count());
+        let last_use = collect_last_use(&proc, block_id, liveness.used_count());
 
-        let needs_normalization =
-            proc.predecessors(block_id).any(|p| Some(p) != dom_tree.parent(block_id));
-        if needs_normalization {
-            let count_popped = stack
+        if proc.predecessors(block_id).len() > 1 {
+            let dead_count = stack
                 .contents()
                 .iter()
-                .copied()
-                .rev()
-                .take_while(|&x| x.is_none_or(|x| !pinning.is_pinned_through(x)))
-                .filter(|&x| x.is_none_or(|x| !liveness.live_in(x)))
-                .count();
-            stack.popn(count_popped);
+                .rposition(|&x| x.is_some_and(|x| liveness.live_in(x)))
+                .map_or(stack.len(), |i| stack.len() - 1 - i);
+            stack.popn(dead_count);
         }
 
-        let block = proc.block(block_id);
         compile_block(
             block,
             &mut stack,
@@ -84,7 +80,7 @@ fn compile_proc(
     }
 }
 
-fn build_last_use(proc: &ProcCfg, block_id: CfgId, capacity: usize) -> HashMap<Id, InstrIdx> {
+fn collect_last_use(proc: &ProcCfg, block_id: CfgId, capacity: usize) -> HashMap<Id, InstrIdx> {
     let mut last_use = HashMap::with_capacity(capacity);
     for (i, x, _) in proc.instructions(block_id).rev() {
         last_use.entry(x).or_insert(i);
@@ -823,7 +819,8 @@ impl Successors for ProcCfg {
 }
 
 impl Predecessors for ProcCfg {
-    fn predecessors(&self, node: Self::Node) -> impl Iterator<Item = Self::Node> {
+    #[allow(refining_impl_trait)]
+    fn predecessors(&self, node: Self::Node) -> impl ExactSizeIterator<Item = Self::Node> {
         self.preds.edges_from(node)
     }
 }
@@ -1162,4 +1159,5 @@ mod tests {
             ]
         );
     }
+
 }

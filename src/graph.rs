@@ -236,7 +236,7 @@ impl<N> Default for EdgeArray<N> {
 }
 
 impl<N: Idx> EdgeArray<N> {
-    pub fn edges_from(&self, node: N) -> impl Iterator<Item = N> {
+    pub fn edges_from(&self, node: N) -> impl ExactSizeIterator<Item = N> {
         let index = node.index();
         let start = self.node_starts[index];
         let end = self
