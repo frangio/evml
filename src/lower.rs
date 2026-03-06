@@ -34,12 +34,13 @@ fn lower_expr(
 ) -> core::Expr {
     match expr {
         ast::Expr::Unit => core::Expr::Unit,
-        ast::Expr::Val(v) => core::Expr::Val(lower_val(v)),
+        ast::Expr::Const(c) => core::Expr::Const(c),
+        ast::Expr::Var(x) => core::Expr::Var(x),
         ast::Expr::Op(op, args) => {
-            core::Expr::Op(op, args.into_iter().map(|arg| lower_expr_to_val(arg, priors, ids)).collect())
+            core::Expr::Op(op, args.into_iter().map(|arg| lower_expr_to_var(arg, priors, ids)).collect())
         }
         ast::Expr::Apply(f, args) => {
-            core::Expr::Apply(f, args.into_iter().map(|arg| lower_expr_to_val(arg, priors, ids)).collect())
+            core::Expr::Apply(f, args.into_iter().map(|arg| lower_expr_to_var(arg, priors, ids)).collect())
         }
         ast::Expr::IfThenElse(cond_then_else) => {
             let (cond, then_else) = *cond_then_else;
@@ -52,31 +53,21 @@ fn lower_expr(
     }
 }
 
-fn lower_expr_to_val(
-    expr: ast::Expr<Id>,
-    priors: &mut Vec<(Option<Id>, core::Expr)>,
-    ids: &mut IdGen,
-) -> core::Val {
-    match lower_expr(expr, priors, ids) {
-        core::Expr::Val(val) => val,
-        expr => {
-            let x = ids.generate();
-            priors.push((Some(x), expr));
-            core::Val::Var(x)
-        }
-    }
-}
-
 fn lower_expr_to_var(
     expr: ast::Expr<Id>,
     priors: &mut Vec<(Option<Id>, core::Expr)>,
     ids: &mut IdGen,
 ) -> Id {
-    match lower_expr_to_val(expr, priors, ids) {
-        core::Val::Var(x) => x,
-        core::Val::Const(c) => {
+    match lower_expr(expr, priors, ids) {
+        core::Expr::Var(x) => x,
+        core::Expr::Const(c) => {
             let x = ids.generate();
-            priors.push((Some(x), core::Expr::Val(core::Val::Const(c))));
+            priors.push((Some(x), core::Expr::Const(c)));
+            x
+        }
+        expr => {
+            let x = ids.generate();
+            priors.push((Some(x), expr));
             x
         }
     }
@@ -89,11 +80,11 @@ fn expr_to_tail(
 ) -> core::TailExpr {
     match expr {
         core::Expr::Unit => core::TailExpr::Unit,
-        core::Expr::Val(core::Val::Var(x)) => core::TailExpr::Var(x),
+        core::Expr::Var(x) => core::TailExpr::Var(x),
 
-        core::Expr::Val(core::Val::Const(c)) => {
+        core::Expr::Const(c) => {
             let x = ids.generate();
-            priors.push((Some(x), core::Expr::Val(core::Val::Const(c))));
+            priors.push((Some(x), core::Expr::Const(c)));
             core::TailExpr::Var(x)
         }
 
@@ -115,12 +106,5 @@ fn expr_to_tail(
         core::Expr::IfThenElse(cond, blocks) => {
             core::TailExpr::IfThenElse(cond, blocks)
         }
-    }
-}
-
-fn lower_val(val: ast::Val<Id>) -> core::Val {
-    match val {
-        ast::Val::Const(c) => core::Val::Const(c),
-        ast::Val::Var(x) => core::Val::Var(x),
     }
 }

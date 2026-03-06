@@ -45,13 +45,6 @@ fn type_check_block(block: &ast::Block<Id>, mut env: HashMap<Id, Type>) -> Resul
 fn type_check_expr(expr: &ast::Expr<Id>, env: &HashMap<Id, Type>) -> Result<usize> {
     use crate::ast::*;
 
-    let type_check_val = |v: &Val<Id>| -> Result<usize> {
-        if let Val::Var(x) = v {
-            ensure!(env.get(x).copied() == Some(Type::Val), "variable is not a value");
-        }
-        Ok(1)
-    };
-
     let type_check_arg = |expr: &Expr<Id>| -> Result<()> {
         ensure!(type_check_expr(expr, env)? == 1, "argument expression must produce one value");
         Ok(())
@@ -59,8 +52,11 @@ fn type_check_expr(expr: &ast::Expr<Id>, env: &HashMap<Id, Type>) -> Result<usiz
 
     match expr {
         Expr::Unit => Ok(0),
-
-        Expr::Val(v) => type_check_val(v),
+        Expr::Const(_) => Ok(1),
+        Expr::Var(x) => {
+            ensure!(env.get(x).copied() == Some(Type::Val), "variable is not a value");
+            Ok(1)
+        }
 
         Expr::Op(op, args) => {
             let Some(info) = opcodes::info(*op) else { bail!("unknown opcode {op:#04x?}") };
@@ -101,7 +97,7 @@ mod tests {
 
     #[test]
     fn test_type_check_div_ok() {
-        use super::ast::{Block, Expr::*, Proc, Program, Val::*};
+        use super::ast::{Block, Expr::*, Proc, Program};
         let mut ids = IdGen::new();
         generate_ids! { main in ids };
         let program = Program {
@@ -110,7 +106,7 @@ mod tests {
                 rets: 1,
                 body: Block {
                     priors: vec![],
-                    tail: Op(0x04, Box::new([Val(Const(U256::from(84))), Val(Const(U256::from(2)))])),
+                    tail: Op(0x04, Box::new([Const(U256::from(84)), Const(U256::from(2))])),
                 },
             })],
         };
@@ -119,7 +115,7 @@ mod tests {
 
     #[test]
     fn test_type_check_div_err() {
-        use super::ast::{Block, Expr::*, Proc, Program, Val::*};
+        use super::ast::{Block, Expr::*, Proc, Program};
         let mut ids = IdGen::new();
         generate_ids! { main in ids };
         let program = Program {
@@ -128,7 +124,7 @@ mod tests {
                 rets: 1,
                 body: Block {
                     priors: vec![],
-                    tail: Op(0x04, Box::new([Val(Const(U256::from(84)))])),
+                    tail: Op(0x04, Box::new([Const(U256::from(84))])),
                 },
             })],
         };
@@ -137,7 +133,7 @@ mod tests {
 
     #[test]
     fn test_type_check_pop_err() {
-        use super::ast::{Block, Expr::*, Proc, Program, Val::*};
+        use super::ast::{Block, Expr::*, Proc, Program};
         let mut ids = IdGen::new();
         generate_ids! { main, x in ids };
         let program = Program {
@@ -145,8 +141,8 @@ mod tests {
                 args: Box::new([]),
                 rets: 0,
                 body: Block {
-                    priors: vec![(Some(x), Op(0x50, Box::new([Val(Const(U256::from(42)))])))],
-                    tail: Val(Const(U256::from(0))),
+                    priors: vec![(Some(x), Op(0x50, Box::new([Const(U256::from(42))])))],
+                    tail: Const(U256::from(0)),
                 },
             })],
         };
@@ -155,7 +151,7 @@ mod tests {
 
     #[test]
     fn test_type_check_rejects_void_arg_expr() {
-        use super::ast::{Block, Expr::*, Proc, Program, Val::*};
+        use super::ast::{Block, Expr::*, Proc, Program};
         let mut ids = IdGen::new();
         generate_ids! { main in ids };
         let program = Program {
@@ -169,8 +165,8 @@ mod tests {
                         tail: Op(
                             0x01,
                             Box::new([
-                                Op(0x50, Box::new([Val(Const(U256::from(42)))])),
-                                Val(Const(U256::from(1))),
+                                Op(0x50, Box::new([Const(U256::from(42))])),
+                                Const(U256::from(1)),
                             ]),
                         ),
                     },

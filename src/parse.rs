@@ -5,27 +5,19 @@ pub fn parse(source: &str) -> Result<ast::Program<&str>> {
     use chumsky::prelude::*;
 
     fn parser<'a>() -> impl Parser<'a, &'a str, Program<&'a str>, extra::Err<Rich<'a, char>>> {
-        let val_const = text::digits(10)
+        let expr_const = text::digits(10)
             .to_slice()
             .try_map(|digits: &str, span| {
                 digits
                     .parse::<U256>()
                     .map_err(|e| Rich::custom(span, e.to_string()))
-                    .map(Val::Const)
+                    .map(Expr::Const)
             });
 
-        let val_var = text::ident()
-            .map(|x: &str| Val::Var(x));
-
-        let val = choice((
-            val_const,
-            val_var,
-        )).padded();
+        let expr_var = text::ident().map(|x: &str| Expr::Var(x));
 
         let block = recursive(|block| {
             let expr = recursive(|expr| {
-                let expr_val = val.map(Expr::Val);
-
                 let expr_op = just('@')
                     .ignore_then(text::ident())
                     .try_map(|opcode_name: &str, span| {
@@ -67,7 +59,8 @@ pub fn parse(source: &str) -> Result<ast::Program<&str>> {
                     expr_if,
                     expr_op,
                     expr_apply,
-                    expr_val,
+                    expr_const,
+                    expr_var,
                 ))
                 .padded()
             });

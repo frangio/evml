@@ -7,6 +7,7 @@ edition = "2024"
 anyhow = "1.0.100"
 chumsky = "0.11.1"
 revm = "30.2.0"
+smallvec = "1.15.1"
 
 [[bin]]
 name = "evml"

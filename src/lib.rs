@@ -28,15 +28,10 @@ pub mod ast {
     use crate::U256;
 
     #[derive(Debug)]
-    pub enum Val<T> {
-        Const(U256),
-        Var(T),
-    }
-
-    #[derive(Debug)]
     pub enum Expr<T> {
         Unit,
-        Val(Val<T>),
+        Const(U256),
+        Var(T),
         Op(u8, Box<[Expr<T>]>),
         Apply(T, Box<[Expr<T>]>),
         IfThenElse(Box<(Expr<T>, [Block<T>; 2])>),
@@ -65,17 +60,12 @@ pub mod core {
     use crate::{Id, U256};
 
     #[derive(PartialEq, Eq, Debug)]
-    pub enum Val {
-        Const(U256),
-        Var(Id),
-    }
-
-    #[derive(PartialEq, Eq, Debug)]
     pub enum Expr {
         Unit,
-        Val(Val),
-        Op(u8, Box<[Val]>),
-        Apply(Id, Box<[Val]>),
+        Const(U256),
+        Var(Id),
+        Op(u8, Box<[Id]>),
+        Apply(Id, Box<[Id]>),
         IfThenElse(Id, Box<[Block; 2]>),
     }
 
@@ -83,7 +73,7 @@ pub mod core {
     pub enum TailExpr {
         Unit,
         Var(Id),
-        Apply(Id, Box<[Val]>),
+        Apply(Id, Box<[Id]>),
         IfThenElse(Id, Box<[Block; 2]>),
     }
 
@@ -107,15 +97,9 @@ pub mod core {
         pub procs: Vec<(Id, Proc)>,
     }
 
-    impl Default for Val {
-        fn default() -> Self {
-            Val::Const(Default::default())
-        }
-    }
-
     impl Default for Expr {
         fn default() -> Self {
-            Expr::Val(Default::default())
+            Expr::Const(Default::default())
         }
     }
 }

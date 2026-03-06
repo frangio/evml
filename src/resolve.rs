@@ -66,7 +66,8 @@ fn resolve_expr(
 ) -> Result<Expr<Id>> {
     Ok(match expr {
         Expr::Unit => Expr::Unit,
-        Expr::Val(v) => Expr::Val(resolve_val(v, env)?),
+        Expr::Const(c) => Expr::Const(*c),
+        Expr::Var(x) => Expr::Var(*env.get(x).with_context(|| format!("unbound variable {x}"))?),
         Expr::Op(op, args) => {
             let args = args.iter().map(|expr| resolve_expr(expr, ids, env)).collect::<Result<_>>()?;
             Expr::Op(*op, args)
@@ -83,15 +84,6 @@ fn resolve_expr(
             let then_block = resolve_block(then_block, ids, env.clone())?;
             let else_block = resolve_block(else_block, ids, env.clone())?;
             Expr::IfThenElse(Box::new((cond, [then_block, else_block])))
-        }
-    })
-}
-
-fn resolve_val(val: &Val<&str>, env: &HashMap<&str, Id>) -> Result<Val<Id>> {
-    Ok(match val {
-        Val::Const(c) => Val::Const(*c),
-        Val::Var(x) => {
-            Val::Var(*env.get(x).with_context(|| format!("unbound variable {x}"))?)
         }
     })
 }
