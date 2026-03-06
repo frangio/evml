@@ -201,49 +201,6 @@ fn compile_cont(
     }
 }
 
-fn compile_expr(
-    expr: &core::Expr,
-    output: Option<Id>,
-    is_last_use: impl Fn(Id) -> bool,
-    pinning: &BlockPinning,
-    ids: &mut IdGen,
-    stack: &mut Stack<Id>,
-    code: &mut Vec<asm::Instr>,
-) {
-    use core::*;
-    use asm::*;
-    match expr {
-        Expr::Const(c) => {
-            code.push(Instr::Push(*c));
-            stack.push(output);
-        }
-
-        Expr::Var(x) => {
-            let should_move = is_last_use(*x) && !is_stack_top_pinned(stack, pinning);
-            compile_var(*x, output, 0, should_move, stack, code);
-        }
-
-        Expr::Op(op, args) => {
-            compile_args(args, None, is_last_use, pinning, stack, code);
-            code.push(Instr::Op(*op));
-            stack.popn(args.len());
-            stack.extend(output);
-        }
-
-        Expr::Apply(target, args) => {
-            let ret = ids.generate();
-            compile_args(args, Some(ret), is_last_use, pinning, stack, code);
-            code.push(Instr::PushLabel(*target));
-            code.push(Instr::Jump);
-            code.push(Instr::JumpDest(ret));
-            stack.popn(args.len() + 1);
-            stack.extend(output);
-        }
-
-        Expr::Unit | Expr::IfThenElse(..) => panic!(),
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ContMoveKind {
     PinOut,
@@ -311,6 +268,49 @@ fn collect_cont_move_candidates(
     segments
         .into_iter()
         .flat_map(|segment| segment.range.rev().map(move |i| (segment.kind, i)))
+}
+
+fn compile_expr(
+    expr: &core::Expr,
+    output: Option<Id>,
+    is_last_use: impl Fn(Id) -> bool,
+    pinning: &BlockPinning,
+    ids: &mut IdGen,
+    stack: &mut Stack<Id>,
+    code: &mut Vec<asm::Instr>,
+) {
+    use core::*;
+    use asm::*;
+    match expr {
+        Expr::Const(c) => {
+            code.push(Instr::Push(*c));
+            stack.push(output);
+        }
+
+        Expr::Var(x) => {
+            let should_move = is_last_use(*x) && !is_stack_top_pinned(stack, pinning);
+            compile_var(*x, output, 0, should_move, stack, code);
+        }
+
+        Expr::Op(op, args) => {
+            compile_args(args, None, is_last_use, pinning, stack, code);
+            code.push(Instr::Op(*op));
+            stack.popn(args.len());
+            stack.extend(output);
+        }
+
+        Expr::Apply(target, args) => {
+            let ret = ids.generate();
+            compile_args(args, Some(ret), is_last_use, pinning, stack, code);
+            code.push(Instr::PushLabel(*target));
+            code.push(Instr::Jump);
+            code.push(Instr::JumpDest(ret));
+            stack.popn(args.len() + 1);
+            stack.extend(output);
+        }
+
+        Expr::Unit | Expr::IfThenElse(..) => panic!(),
+    }
 }
 
 fn compile_args(
