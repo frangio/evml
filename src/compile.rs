@@ -17,31 +17,37 @@ use crate::stack::Stack;
 pub fn compile(program: core::Program, ids: &mut IdGen) -> Vec<asm::Instr> {
     let mut code = vec![];
 
-    compile_proc(program.main, &[], Some(program.rets), ids, &mut code);
+    compile_proc(
+        core::Proc {
+            args: Box::new([]),
+            rets: program.rets,
+            body: program.main,
+        },
+        true,
+        ids,
+        &mut code,
+    );
 
     for (label, proc) in program.procs {
         code.push(asm::Instr::JumpDest(label));
-        compile_proc(proc.body, &proc.args, None, ids, &mut code);
+        compile_proc(proc, false, ids, &mut code);
     }
 
     code
 }
 
 fn compile_proc(
-    proc_body: core::Block,
-    args: &[Id],
-    stop: Option<usize>,
+    proc: core::Proc,
+    stop: bool,
     ids: &mut IdGen,
     code: &mut Vec<asm::Instr>,
 ) {
-    let proc = build_cfg(proc_body, stop, ids);
+    let proc = build_cfg(proc, stop, ids);
     let analysis = analyze(&proc);
     let mut block_code: Box<[Vec<asm::Instr>]> = vec![vec![]; proc.blocks.len()].into_boxed_slice();
     let mut block_stack: Box<[Option<(Stack<Id>, usize)>]> = vec![None; proc.blocks.len()].into_boxed_slice();
 
-    let mut stack = Stack::new();
-    stack.extend(args.iter().copied().rev());
-    block_stack[proc.entry().index()] = Some((stack, 0));
+    block_stack[proc.entry().index()] = Some((Stack::new(), 0));
 
     let dom_tree = analysis.dom_tree();
     for visit in dfs(dom_tree) {
@@ -106,9 +112,9 @@ fn compile_block(
     stack: &mut Stack<Id>,
     code: &mut Vec<asm::Instr>,
 ) {
-    stack.extend(block.data.input);
+    stack.extend(block.inputs());
 
-    if let Some(label) = block.data.label {
+    if let Some(label) = block.data().label {
         code.push(asm::Instr::JumpDest(label));
     }
 
@@ -118,7 +124,7 @@ fn compile_block(
     }
 
     compile_cont(
-        &block.data.cont,
+        &block.data().cont,
         fallthrough_label,
         liveness,
         pinning,
@@ -443,6 +449,7 @@ impl Idx for CfgId {
 }
 
 struct ProcCfg {
+    args: Box<[Id]>,
     blocks: Box<[BasicBlock]>,
     segments: Box<[Box<[(Option<Id>, core::Expr)]>]>,
     labeled_blocks: HashMap<Id, usize>,
@@ -470,8 +477,8 @@ enum Cont {
 impl ProcCfg {
     fn block(&self, block_id: CfgId) -> BasicBlockRef<'_> {
         BasicBlockRef {
+            id: block_id,
             proc: self,
-            data: &self.blocks[block_id.index()],
         }
     }
 
@@ -484,7 +491,7 @@ impl ProcCfg {
     }
 
     fn successor_blocks(&self, block_id: CfgId) -> impl ExactSizeIterator<Item = CfgId> {
-        let (target, fallthrough) = match &self.block(block_id).data.cont {
+        let (target, fallthrough) = match &self.block(block_id).data().cont {
             Cont::Stop(_) | Cont::Ret(_) => (None, None),
             Cont::Jump(target, _) => (
                 // Target may be another procedure if this is a tail call
@@ -511,13 +518,27 @@ impl ProcCfg {
 }
 
 struct BasicBlockRef<'a> {
+    id: CfgId,
     proc: &'a ProcCfg,
-    data: &'a BasicBlock,
 }
 
 impl<'a> BasicBlockRef<'a> {
+    fn data(&self) -> &'a BasicBlock {
+        &self.proc.blocks[self.id.index()]
+    }
+
+    fn inputs(&self) -> impl DoubleEndedIterator<Item = Id> + use<'a> {
+        let inputs = if self.id == self.proc.entry() {
+            self.proc.args.as_ref()
+        } else {
+            self.data().input.as_slice()
+        };
+        inputs.iter().copied().rev()
+    }
+
     fn priors(&self) -> &'a [(Option<Id>, core::Expr)] {
-        &self.proc.segments[self.data.segment][self.data.start..self.data.end]
+        let data = self.data();
+        &self.proc.segments[data.segment][data.start..data.end]
     }
 }
 
@@ -554,9 +575,7 @@ fn normalize_tail(
         mut priors,
         mut tail,
     } = block;
-    if let Some(rets) = stop
-        && let TailExpr::Apply(target, args) = tail
-    {
+    if let Some(rets) = stop && let TailExpr::Apply(target, args) = tail {
         assert!(rets <= 1);
         if rets == 0 {
             priors.push((None, Expr::Apply(target, args)));
@@ -620,8 +639,10 @@ impl BasicBlockCandidate {
     }
 }
 
-fn build_cfg(proc_body: core::Block, stop: Option<usize>, ids: &mut IdGen) -> ProcCfg {
+fn build_cfg(proc: core::Proc, stop: bool, ids: &mut IdGen) -> ProcCfg {
     use core::*;
+
+    let Proc { args, body, rets } = proc;
 
     enum QueueItem {
         Finished(BasicBlock),
@@ -642,8 +663,8 @@ fn build_cfg(proc_body: core::Block, stop: Option<usize>, ids: &mut IdGen) -> Pr
     let mut queue = VecDeque::new();
 
     macro_rules! build_candidate {
-        ($block:ident) => {{
-            let (priors, tail) = normalize_tail($block, stop, ids);
+        ($block:expr) => {{
+            let (priors, tail) = normalize_tail($block, stop.then_some(rets), ids);
             let segment = segments.len();
             segments.push(priors.into_boxed_slice());
             BasicBlockCandidate {
@@ -657,7 +678,7 @@ fn build_cfg(proc_body: core::Block, stop: Option<usize>, ids: &mut IdGen) -> Pr
         }};
     }
 
-    queue.push_front(QueueItem::Unvisited(build_candidate!(proc_body)));
+    queue.push_front(QueueItem::Unvisited(build_candidate!(body)));
 
     while queue
         .front()
@@ -700,7 +721,7 @@ fn build_cfg(proc_body: core::Block, stop: Option<usize>, ids: &mut IdGen) -> Pr
                                     None
                                 };
                                 cont_label.map_or(
-                                    if stop.is_some() {
+                                    if stop {
                                         Cont::Stop(res)
                                     } else {
                                         Cont::Ret(res)
@@ -780,6 +801,7 @@ fn build_cfg(proc_body: core::Block, stop: Option<usize>, ids: &mut IdGen) -> Pr
         .collect();
 
     let mut cfg = ProcCfg {
+        args,
         segments: segments.into_boxed_slice(),
         preds: EdgeArray::default(),
         blocks: blocks.into_boxed_slice(),
@@ -853,11 +875,8 @@ impl Procedure for ProcCfg {
         }
 
         let block = self.block(b);
-        let input_defs = block
-            .data
-            .input
-            .map(|id| (InstrIdx::Input, id, DefUse::Def));
-        let cont_ids: &[Id] = match &block.data.cont {
+        let input_defs = block.inputs().map(|id| (InstrIdx::Input, id, DefUse::Def));
+        let cont_ids: &[Id] = match &block.data().cont {
             Cont::Stop(x) | Cont::Ret(x) => x.as_slice(),
             Cont::Jump(_, args) => args,
             Cont::JumpIf { cond, .. } => slice::from_ref(cond),
@@ -911,7 +930,7 @@ mod tests {
             priors: vec![],
             tail: TailExpr::Var(x),
         };
-        let indexed = build_cfg(block, Some(1), &mut ids);
+        let indexed = build_cfg(core::Proc { args: Box::new([]), rets: 1, body: block }, true, &mut ids);
         assert_eq!(indexed.blocks.len(), 1);
 
         let entry_successors: Vec<_> = indexed.successors(indexed.entry()).collect();
@@ -938,7 +957,7 @@ mod tests {
                 ]),
             ),
         };
-        let indexed = build_cfg(block, Some(1), &mut ids);
+        let indexed = build_cfg(core::Proc { args: Box::new([]), rets: 1, body: block }, true, &mut ids);
         assert_eq!(indexed.blocks.len(), 3);
 
         let entry = indexed.entry();
@@ -983,7 +1002,7 @@ mod tests {
             tail: TailExpr::Var(y),
         };
 
-        let indexed = build_cfg(block, Some(1), &mut ids);
+        let indexed = build_cfg(core::Proc { args: Box::new([]), rets: 1, body: block }, true, &mut ids);
         assert_eq!(indexed.blocks.len(), 4);
 
         let entry = indexed.entry();
