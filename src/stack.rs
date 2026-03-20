@@ -1,44 +1,17 @@
-use std::hash::Hash;
-
-/// A stack of values and temporary holes, with lazy checkpoint/restore support.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stack<T> {
     contents: Vec<Option<T>>,
-    backup: Vec<Option<T>>,
-    checkpoints: Vec<Checkpoint>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Checkpoint {
-    stack_height: usize,
-    backup_start: usize,
-}
-
-impl<T: Copy + Eq + Hash> Stack<T> {
+impl<T: Copy + Eq> Stack<T> {
     pub fn new() -> Self {
         Self {
             contents: Vec::new(),
-            backup: Vec::new(),
-            checkpoints: Vec::new(),
         }
     }
 
     pub fn len(&self) -> usize {
         self.contents.len()
-    }
-
-    pub fn push_checkpoint(&mut self) {
-        self.checkpoints.push(Checkpoint {
-            stack_height: self.len(),
-            backup_start: self.backup.len(),
-        });
-    }
-
-    pub fn pop_checkpoint(&mut self) {
-        let checkpoint = self.checkpoints.pop().unwrap();
-        let saved_len = self.backup.len() - checkpoint.backup_start;
-        self.contents.truncate(checkpoint.stack_height - saved_len);
-        self.contents.extend(self.backup.drain(checkpoint.backup_start..).rev());
     }
 
     pub fn push(&mut self, x: Option<T>) {
@@ -47,9 +20,7 @@ impl<T: Copy + Eq + Hash> Stack<T> {
 
     pub fn popn(&mut self, count: usize) {
         assert!(count <= self.len());
-        let new_len = self.len() - count;
-        self.backup_from(new_len);
-        self.contents.truncate(new_len);
+        self.contents.truncate(self.len() - count);
     }
 
     pub fn read(&self, depth: usize) -> Option<T> {
@@ -70,19 +41,7 @@ impl<T: Copy + Eq + Hash> Stack<T> {
         assert!(depth < self.len());
         let top = self.len() - 1;
         let index = top - depth;
-        self.backup_from(index);
         self.contents.swap(index, top);
-    }
-
-    fn backup_from(&mut self, index: usize) {
-        let Some(checkpoint) = self.checkpoints.last() else {
-            return;
-        };
-        let backed_up = self.backup.len() - checkpoint.backup_start;
-        let watermark = checkpoint.stack_height - backed_up;
-        if index < watermark {
-            self.backup.extend(self.contents[index..watermark].iter().rev().copied());
-        }
     }
 
     pub fn contents(&self) -> &[Option<T>] {
@@ -90,7 +49,7 @@ impl<T: Copy + Eq + Hash> Stack<T> {
     }
 }
 
-impl<T: Copy + Eq + Hash> Extend<T> for Stack<T> {
+impl<T: Copy + Eq> Extend<T> for Stack<T> {
     fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
         self.contents.extend(iter.into_iter().map(Some));
     }
@@ -172,65 +131,6 @@ mod tests {
         s.push(None);
         s.swap(2);
         assert_eq!(s.read(0), Some(1));
-    }
-
-    #[test]
-    fn pop_checkpoint_restores_swapped_values() {
-        let mut s: Stack<u8> = Stack::new();
-        s.extend([1, 2, 3]);
-        s.push_checkpoint();
-        s.swap(2);
-        s.pop_checkpoint();
-        assert_eq!(s.len(), 3);
-        assert_eq!(s.read(0), Some(3));
-        assert_eq!(s.read(1), Some(2));
-        assert_eq!(s.read(2), Some(1));
-    }
-
-    #[test]
-    fn pop_checkpoint_restores_popped_values() {
-        let mut s: Stack<u8> = Stack::new();
-        s.extend([1, 2, 3]);
-        s.push_checkpoint();
-        s.popn(2);
-        s.pop_checkpoint();
-        assert_eq!(s.len(), 3);
-        assert_eq!(s.read(0), Some(3));
-        assert_eq!(s.read(1), Some(2));
-        assert_eq!(s.read(2), Some(1));
-    }
-
-    #[test]
-    fn pop_checkpoint_discards_pushed_values() {
-        let mut s: Stack<u8> = Stack::new();
-        s.extend([1, 2]);
-        s.push_checkpoint();
-        s.push(Some(3));
-        s.push(None);
-        s.pop_checkpoint();
-        assert_eq!(s.len(), 2);
-        assert_eq!(s.read(0), Some(2));
-        assert_eq!(s.read(1), Some(1));
-    }
-
-    #[test]
-    fn nested_checkpoints_restore_in_lifo_order() {
-        let mut s: Stack<u8> = Stack::new();
-        s.extend([1, 2, 3]);
-        s.push_checkpoint();
-        s.swap(2);
-        s.push_checkpoint();
-        s.popn(1);
-        s.pop_checkpoint();
-        assert_eq!(s.len(), 3);
-        assert_eq!(s.read(0), Some(1));
-        assert_eq!(s.read(1), Some(2));
-        assert_eq!(s.read(2), Some(3));
-        s.pop_checkpoint();
-        assert_eq!(s.len(), 3);
-        assert_eq!(s.read(0), Some(3));
-        assert_eq!(s.read(1), Some(2));
-        assert_eq!(s.read(2), Some(1));
     }
 
 }

@@ -37,31 +37,32 @@ fn compile_proc(
     let proc = build_cfg(proc_body, stop, ids);
     let analysis = analyze(&proc);
     let mut block_code: Box<[Vec<asm::Instr>]> = vec![vec![]; proc.blocks.len()].into_boxed_slice();
+    let mut block_stack: Box<[Option<(Stack<Id>, usize)>]> = vec![None; proc.blocks.len()].into_boxed_slice();
 
     let mut stack = Stack::new();
     stack.extend(args.iter().copied().rev());
+    block_stack[proc.entry().index()] = Some((stack, 0));
 
     let dom_tree = analysis.dom_tree();
     for visit in dfs(dom_tree) {
         if visit.exit {
-            stack.pop_checkpoint();
             continue;
         }
-        stack.push_checkpoint();
 
         let block_id = visit.node;
         let block = proc.block(block_id);
         let liveness = analysis.liveness(block_id);
         let pinning = analysis.pinning(block_id);
         let last_use = collect_last_use(&proc, block_id, liveness.used_count());
+        let (stack, dead_count) = block_stack[block_id.index()].as_mut().unwrap();
 
         if proc.predecessors(block_id).len() > 1 {
-            let dead_count = stack
+            *dead_count = stack
                 .contents()
                 .iter()
                 .rposition(|&x| x.is_some_and(|x| liveness.live_in(x)))
                 .map_or(stack.len(), |i| stack.len() - 1 - i);
-            stack.popn(dead_count);
+            stack.popn(*dead_count);
         }
 
         compile_block(
@@ -71,9 +72,14 @@ fn compile_proc(
             pinning,
             &last_use,
             ids,
-            &mut stack,
+            stack,
             &mut block_code[block_id.index()],
         );
+
+        for next in dom_tree.successors(block_id) {
+            let (stack, _) = block_stack[block_id.index()].as_ref().unwrap();
+            block_stack[next.index()] = Some((stack.clone(), 0));
+        }
     }
 
     code.reserve(block_code.iter().map(Vec::len).sum());
