@@ -831,14 +831,12 @@ impl EntryNode for ProcCfg {
 }
 
 impl Successors for ProcCfg {
-    #[allow(refining_impl_trait)]
     fn successors(&self, node: Self::Node) -> impl ExactSizeIterator<Item = Self::Node> {
         self.successor_blocks(node)
     }
 }
 
 impl Predecessors for ProcCfg {
-    #[allow(refining_impl_trait)]
     fn predecessors(&self, node: Self::Node) -> impl ExactSizeIterator<Item = Self::Node> {
         self.preds.edges_from(node)
     }

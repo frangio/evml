@@ -28,11 +28,11 @@ pub trait EntryNode: Graph {
 }
 
 pub trait Predecessors: Graph {
-    fn predecessors(&self, node: Self::Node) -> impl Iterator<Item = Self::Node>;
+    fn predecessors(&self, node: Self::Node) -> impl ExactSizeIterator<Item = Self::Node>;
 }
 
 pub trait Successors: Graph {
-    fn successors(&self, node: Self::Node) -> impl Iterator<Item = Self::Node>;
+    fn successors(&self, node: Self::Node) -> impl ExactSizeIterator<Item = Self::Node>;
 }
 
 pub trait NodeOrdering<N> {
@@ -60,13 +60,13 @@ impl<G: EntryNode + ?Sized> EntryNode for &G {
 }
 
 impl<G: Predecessors + ?Sized> Predecessors for &G {
-    fn predecessors(&self, node: Self::Node) -> impl Iterator<Item = Self::Node> {
+    fn predecessors(&self, node: Self::Node) -> impl ExactSizeIterator<Item = Self::Node> {
         (*self).predecessors(node)
     }
 }
 
 impl<G: Successors + ?Sized> Successors for &G {
-    fn successors(&self, node: Self::Node) -> impl Iterator<Item = Self::Node> {
+    fn successors(&self, node: Self::Node) -> impl ExactSizeIterator<Item = Self::Node> {
         (*self).successors(node)
     }
 }
@@ -210,13 +210,13 @@ impl<G: Graph> Graph for Transpose<G> {
 }
 
 impl<G: Successors> Predecessors for Transpose<G> {
-    fn predecessors(&self, node: Self::Node) -> impl Iterator<Item = Self::Node> {
+    fn predecessors(&self, node: Self::Node) -> impl ExactSizeIterator<Item = Self::Node> {
         self.inner.successors(node)
     }
 }
 
 impl<G: Predecessors> Successors for Transpose<G> {
-    fn successors(&self, node: Self::Node) -> impl Iterator<Item = Self::Node> {
+    fn successors(&self, node: Self::Node) -> impl ExactSizeIterator<Item = Self::Node> {
         self.inner.predecessors(node)
     }
 }
@@ -290,13 +290,13 @@ impl<N: Idx> EntryNode for Tree<N> {
 }
 
 impl<N: Idx> Successors for Tree<N> {
-    fn successors(&self, node: Self::Node) -> impl Iterator<Item = Self::Node> {
+    fn successors(&self, node: Self::Node) -> impl ExactSizeIterator<Item = Self::Node> {
         self.children.edges_from(node)
     }
 }
 
 impl<N: Idx> Predecessors for Tree<N> {
-    fn predecessors(&self, node: Self::Node) -> impl Iterator<Item = Self::Node> {
+    fn predecessors(&self, node: Self::Node) -> impl ExactSizeIterator<Item = Self::Node> {
         self.parents[node.index()].into_iter()
     }
 }
@@ -367,11 +367,12 @@ pub fn postorder<G: EntryNode + Successors>(g: G) -> Box<[G::Node]> {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use std::cell::OnceCell;
+    use std::{cell::OnceCell, collections::HashMap};
 
     pub struct TestGraph {
         pub node_count: usize,
-        pub edges: Vec<(usize, usize)>,
+        succs: HashMap<usize, Vec<usize>>,
+        preds: HashMap<usize, Vec<usize>>,
         entry: OnceCell<usize>,
     }
 
@@ -386,10 +387,16 @@ pub mod tests {
         }
 
         pub fn with_nodes(node_count: usize, edges: &[(usize, usize)]) -> Self {
-            let edges = edges.to_vec();
+            let mut succs = HashMap::<usize, Vec<usize>>::new();
+            let mut preds = HashMap::<usize, Vec<usize>>::new();
+            for &(u, v) in edges {
+                succs.entry(u).or_default().push(v);
+                preds.entry(v).or_default().push(u);
+            }
             Self {
                 node_count,
-                edges,
+                succs,
+                preds,
                 entry: OnceCell::new(),
             }
         }
@@ -438,10 +445,8 @@ pub mod tests {
     }
 
     impl Predecessors for TestGraph {
-        fn predecessors(&self, node: usize) -> impl Iterator<Item = usize> {
-            self.edges
-                .iter()
-                .filter_map(move |&(u, v)| (v == node).then_some(u))
+        fn predecessors(&self, node: usize) -> impl ExactSizeIterator<Item = usize> {
+            self.preds.get(&node).map(Vec::as_slice).unwrap_or(&[]).iter().copied()
         }
     }
 
@@ -449,7 +454,7 @@ pub mod tests {
         fn entry(&self) -> usize {
             *self.entry.get_or_init(|| {
                 let mut entries =
-                    (0..self.node_count).filter(|&n| self.predecessors(n).next().is_none());
+                    (0..self.node_count).filter(|&n| self.predecessors(n).len() == 0);
                 let entry = entries.next().expect("no entry node found");
                 assert!(entries.next().is_none(), "multiple entry nodes found");
                 entry
@@ -458,10 +463,8 @@ pub mod tests {
     }
 
     impl Successors for TestGraph {
-        fn successors(&self, node: usize) -> impl Iterator<Item = usize> {
-            self.edges
-                .iter()
-                .filter_map(move |&(u, v)| (u == node).then_some(v))
+        fn successors(&self, node: usize) -> impl ExactSizeIterator<Item = usize> {
+            self.succs.get(&node).map(Vec::as_slice).unwrap_or(&[]).iter().copied()
         }
     }
 
