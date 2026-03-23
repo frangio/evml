@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::iter::{chain, zip};
+use std::iter::{chain, repeat_n, zip};
 use std::mem::{replace, take};
 use std::num::NonZero;
 use std::ops::Range;
@@ -44,12 +44,10 @@ fn compile_proc(
 ) {
     let proc = build_cfg(proc, stop, ids);
     let analysis = analyze(&proc);
-    let mut block_code: Box<[Vec<asm::Instr>]> = vec![vec![]; proc.blocks.len()].into_boxed_slice();
-    let mut block_stack: Box<[Option<(Stack<Id>, usize)>]> = vec![None; proc.blocks.len()].into_boxed_slice();
-
-    block_stack[proc.entry().index()] = Some((Stack::new(), 0));
+    let mut block_contexts: Box<[BlockContext]> = vec![BlockContext::default(); proc.blocks.len()].into_boxed_slice();
 
     let dom_tree = analysis.dom_tree();
+
     for visit in dfs(dom_tree) {
         if visit.exit {
             continue;
@@ -60,15 +58,16 @@ fn compile_proc(
         let liveness = analysis.liveness(block_id);
         let pinning = analysis.pinning(block_id);
         let last_use = collect_last_use(&proc, block_id, liveness.used_count());
-        let (stack, dead_count) = block_stack[block_id.index()].as_mut().unwrap();
+        let bc = &mut block_contexts[block_id.index()];
 
         if proc.predecessors(block_id).len() > 1 {
-            *dead_count = stack
+            bc.dead_count = bc
+                .stack
                 .contents()
                 .iter()
                 .rposition(|&x| x.is_some_and(|x| liveness.live_in(x)))
-                .map_or(stack.len(), |i| stack.len() - 1 - i);
-            stack.popn(*dead_count);
+                .map_or(bc.stack.len(), |i| bc.stack.len() - 1 - i);
+            bc.stack.popn(bc.dead_count);
         }
 
         compile_block(
@@ -78,19 +77,20 @@ fn compile_proc(
             pinning,
             &last_use,
             ids,
-            stack,
-            &mut block_code[block_id.index()],
+            bc,
         );
 
-        for next in dom_tree.successors(block_id) {
-            let (stack, _) = block_stack[block_id.index()].as_ref().unwrap();
-            block_stack[next.index()] = Some((stack.clone(), 0));
+        let children = dom_tree.successors(block_id);
+        let stacks = repeat_n(bc.stack.clone(), children.len());
+        for (child, stack) in zip(children, stacks) {
+            block_contexts[child.index()].stack = stack;
         }
     }
 
-    code.reserve(block_code.iter().map(Vec::len).sum());
+    code.reserve(block_contexts.iter().map(|bc| bc.code.len()).sum());
+
     for block_id in proc.blocks_rpo() {
-        code.extend(take(&mut block_code[block_id.index()]));
+        code.extend(take(&mut block_contexts[block_id.index()].code));
     }
 }
 
@@ -102,6 +102,14 @@ fn collect_last_use(proc: &ProcCfg, block_id: CfgId, capacity: usize) -> HashMap
     last_use
 }
 
+#[derive(Clone, Default)]
+pub struct BlockContext {
+    pub stack_log: Vec<(Id, Option<Id>)>,
+    pub stack: Stack<Id>,
+    pub code: Vec<asm::Instr>,
+    pub dead_count: usize,
+}
+
 fn compile_block(
     block: BasicBlockRef,
     fallthrough_label: Option<Id>,
@@ -109,18 +117,17 @@ fn compile_block(
     pinning: &BlockPinning,
     last_use: &HashMap<Id, InstrIdx>,
     ids: &mut IdGen,
-    stack: &mut Stack<Id>,
-    code: &mut Vec<asm::Instr>,
+    bc: &mut BlockContext,
 ) {
-    stack.extend(block.inputs());
+    bc.stack.extend(block.inputs());
 
     if let Some(label) = block.data().label {
-        code.push(asm::Instr::JumpDest(label));
+        bc.code.push(asm::Instr::JumpDest(label));
     }
 
     for (i, (x, expr)) in block.priors().iter().enumerate() {
         let is_last_use = |y| !liveness.live_out(y) && last_use[&y] == InstrIdx::Prior(i);
-        compile_expr(expr, *x, is_last_use, pinning, ids, stack, code);
+        compile_expr(expr, *x, is_last_use, pinning, ids, bc);
     }
 
     compile_cont(
@@ -129,8 +136,7 @@ fn compile_block(
         liveness,
         pinning,
         last_use,
-        stack,
-        code,
+        bc,
     );
 }
 
@@ -140,40 +146,39 @@ fn compile_cont(
     liveness: &BlockLiveness,
     pinning: &BlockPinning,
     last_use: &HashMap<Id, InstrIdx>,
-    stack: &mut Stack<Id>,
-    code: &mut Vec<asm::Instr>,
+    bc: &mut BlockContext,
 ) {
     use asm::*;
 
-    let mut move_candidates = collect_cont_move_candidates(stack, liveness, pinning, last_use);
+    let mut move_candidates = collect_cont_move_candidates(&bc.stack, liveness, pinning, last_use);
 
     while let Some((from_kind, from_index)) = move_candidates.next() {
         if from_kind == ContMoveKind::Dead {
-            let top_index = stack.len() - 1;
+            let top_index = bc.stack.len() - 1;
             if from_index < top_index {
                 let from_depth = top_index - from_index;
-                code.push(Instr::Swap(from_depth));
-                stack.swap(from_depth);
+                bc.code.push(Instr::Swap(from_depth));
+                bc.stack.swap(from_depth);
             }
-            code.push(Instr::Pop);
-            stack.popn(1);
+            bc.code.push(Instr::Pop);
+            bc.stack.popn(1);
         } else if from_kind == ContMoveKind::PinOut
             && let Some((to_kind, to_index)) =
                 move_candidates.rfind(|&(k, _)| k != ContMoveKind::PinOut)
         {
             debug_assert!(to_index < from_index);
-            let top_index = stack.len() - 1;
+            let top_index = bc.stack.len() - 1;
             if from_index < top_index {
                 let from_depth = top_index - from_index;
-                code.push(Instr::Swap(from_depth));
-                stack.swap(from_depth);
+                bc.code.push(Instr::Swap(from_depth));
+                bc.stack.swap(from_depth);
             }
             let to_depth = top_index - to_index;
-            code.push(Instr::Swap(to_depth));
-            stack.swap(to_depth);
+            bc.code.push(Instr::Swap(to_depth));
+            bc.stack.swap(to_depth);
             if to_kind == ContMoveKind::Dead {
-                code.push(Instr::Pop);
-                stack.popn(1);
+                bc.code.push(Instr::Pop);
+                bc.stack.popn(1);
             }
         }
     }
@@ -182,33 +187,33 @@ fn compile_cont(
 
     match *cont {
         Cont::Stop(_) => {
-            code.push(Instr::Stop);
+            bc.code.push(Instr::Stop);
         }
 
         Cont::Ret(x) => {
             let offset = x.is_some() as usize;
             if offset > 0 {
-                code.push(Instr::Swap(offset));
+                bc.code.push(Instr::Swap(offset));
             }
-            code.push(Instr::Jump);
+            bc.code.push(Instr::Jump);
         }
 
         Cont::Jump(target, ref args) => {
-            compile_args(args, None, should_move, pinning, stack, code);
-            stack.popn(args.len());
+            compile_args(args, None, should_move, pinning, bc);
+            bc.stack.popn(args.len());
 
             if Some(target) != fallthrough_label {
-                code.push(Instr::PushLabel(target));
-                code.push(Instr::Jump);
+                bc.code.push(Instr::PushLabel(target));
+                bc.code.push(Instr::Jump);
             }
         }
 
         Cont::JumpIf { cond, then } => {
-            let should_move = should_move(cond) && !is_stack_top_pinned(stack, pinning);
-            compile_var(cond, None, 0, should_move, stack, code);
-            code.push(Instr::PushLabel(then));
-            code.push(Instr::JumpIf);
-            stack.popn(1);
+            let should_move = should_move(cond) && !is_stack_top_pinned(&bc.stack, pinning);
+            compile_var(cond, None, 0, should_move, bc);
+            bc.code.push(Instr::PushLabel(then));
+            bc.code.push(Instr::JumpIf);
+            bc.stack.popn(1);
         }
     }
 }
@@ -288,37 +293,36 @@ fn compile_expr(
     is_last_use: impl Fn(Id) -> bool,
     pinning: &BlockPinning,
     ids: &mut IdGen,
-    stack: &mut Stack<Id>,
-    code: &mut Vec<asm::Instr>,
+    bc: &mut BlockContext,
 ) {
     use core::*;
     use asm::*;
     match expr {
         Expr::Const(c) => {
-            code.push(Instr::Push(*c));
-            stack.push(output);
+            bc.code.push(Instr::Push(*c));
+            bc.stack.push(output);
         }
 
         Expr::Var(x) => {
-            let should_move = is_last_use(*x) && !is_stack_top_pinned(stack, pinning);
-            compile_var(*x, output, 0, should_move, stack, code);
+            let should_move = is_last_use(*x) && !is_stack_top_pinned(&bc.stack, pinning);
+            compile_var(*x, output, 0, should_move, bc);
         }
 
         Expr::Op(op, args) => {
-            compile_args(args, None, is_last_use, pinning, stack, code);
-            code.push(Instr::Op(*op));
-            stack.popn(args.len());
-            stack.extend(output);
+            compile_args(args, None, is_last_use, pinning, bc);
+            bc.code.push(Instr::Op(*op));
+            bc.stack.popn(args.len());
+            bc.stack.extend(output);
         }
 
         Expr::Apply(target, args) => {
             let ret = ids.generate();
-            compile_args(args, Some(ret), is_last_use, pinning, stack, code);
-            code.push(Instr::PushLabel(*target));
-            code.push(Instr::Jump);
-            code.push(Instr::JumpDest(ret));
-            stack.popn(args.len() + 1);
-            stack.extend(output);
+            compile_args(args, Some(ret), is_last_use, pinning, bc);
+            bc.code.push(Instr::PushLabel(*target));
+            bc.code.push(Instr::Jump);
+            bc.code.push(Instr::JumpDest(ret));
+            bc.stack.popn(args.len() + 1);
+            bc.stack.extend(output);
         }
 
         Expr::Unit | Expr::IfThenElse(..) => panic!(),
@@ -330,8 +334,7 @@ fn compile_args(
     ret_label: Option<Id>,
     is_last_use: impl Fn(Id) -> bool,
     pinning: &BlockPinning,
-    stack: &mut Stack<Id>,
-    code: &mut Vec<asm::Instr>,
+    bc: &mut BlockContext,
 ) {
     use asm::*;
 
@@ -349,7 +352,7 @@ fn compile_args(
 
         let can_move = allow_moves && is_last_use(arg) && !args[..i].contains(&arg);
         let should_move = can_move
-            && stack.read(move_count).is_none_or(|x| !pinning.is_pinned_through(x));
+            && bc.stack.read(move_count).is_none_or(|x| !pinning.is_pinned_through(x));
         if can_move && !should_move {
             allow_moves = false;
         }
@@ -359,17 +362,17 @@ fn compile_args(
     }
 
     if let Some(ret_label) = ret_label {
-        code.push(Instr::PushLabel(ret_label));
-        stack.push(None);
+        bc.code.push(Instr::PushLabel(ret_label));
+        bc.stack.push(None);
         let offset = move_count;
         if offset > 0 {
-            code.push(Instr::Swap(offset));
-            stack.swap(offset);
+            bc.code.push(Instr::Swap(offset));
+            bc.stack.swap(offset);
         }
     }
 
     for (&arg, plan) in zip(args, plan).rev() {
-        compile_var(arg, None, plan.target_depth, plan.should_move, stack, code);
+        compile_var(arg, None, plan.target_depth, plan.should_move, bc);
     }
 }
 
@@ -378,25 +381,24 @@ fn compile_var(
     name: Option<Id>,
     target_depth: usize,
     should_move: bool,
-    stack: &mut Stack<Id>,
-    code: &mut Vec<asm::Instr>,
+    bc: &mut BlockContext,
 ) {
     use asm::*;
-    let depth = stack.depth(x);
+    let depth = bc.stack.depth(x);
     if should_move {
         if depth > 0 {
-            code.push(Instr::Swap(depth));
-            stack.swap(depth);
+            bc.code.push(Instr::Swap(depth));
+            bc.stack.swap(depth);
         }
-        stack.popn(1);
+        bc.stack.popn(1);
     } else {
-        code.push(Instr::Dup(depth));
+        bc.code.push(Instr::Dup(depth));
     }
-    stack.push(name);
+    bc.stack.push(name);
 
     if target_depth > 0 {
-        code.push(Instr::Swap(target_depth));
-        stack.swap(target_depth);
+        bc.code.push(Instr::Swap(target_depth));
+        bc.stack.swap(target_depth);
     }
 }
 
