@@ -11,7 +11,7 @@ use crate::utils::exact_size_chain;
 use crate::{asm, core};
 use crate::id::{Id, IdGen};
 use crate::analysis::{self, Cfg, DefUse, Procedure, liveness};
-use crate::graph::{dfs, EdgeArray, EntryNode, Graph, Idx, NodeOrdering, Predecessors, Successors, Tree, idom, predecessor_edges};
+use crate::graph::{Dfs, EdgeArray, EntryNode, Graph, Idx, NodeOrdering, Predecessors, Successors, Tree, idom, predecessor_edges};
 use crate::stack::Stack;
 
 pub fn compile(program: core::Program, ids: &mut IdGen) -> Vec<asm::Instr> {
@@ -48,7 +48,7 @@ fn compile_proc(
 
     let dom_tree = analysis.dom_tree();
 
-    for visit in dfs(dom_tree) {
+    for visit in dom_tree.dfs() {
         if visit.exit {
             continue;
         }
@@ -840,7 +840,7 @@ impl Successors for ProcCfg {
 
 impl Predecessors for ProcCfg {
     fn predecessors(&self, node: Self::Node) -> impl ExactSizeIterator<Item = Self::Node> {
-        self.preds.edges_from(node)
+        self.preds.edges_from(node).iter().copied()
     }
 }
 

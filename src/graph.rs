@@ -1,4 +1,4 @@
-use std::{mem::replace, num::NonZero, ops::Range};
+use std::{iter, mem::replace, num::NonZero};
 use crate::utils::{BitSet, ShiftStack};
 
 pub trait Idx: Copy + Eq {
@@ -35,6 +35,16 @@ pub trait Successors: Graph {
     fn successors(&self, node: Self::Node) -> impl ExactSizeIterator<Item = Self::Node>;
 }
 
+pub trait Dfs: Graph {
+    fn dfs(&self) -> impl Iterator<Item = NodeVisit<Self::Node>>;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NodeVisit<N> {
+    pub node: N,
+    pub exit: bool,
+}
+
 pub trait NodeOrdering<N> {
     fn position(&self, node: N) -> usize;
     fn node_at(&self, position: usize) -> N;
@@ -68,6 +78,12 @@ impl<G: Predecessors + ?Sized> Predecessors for &G {
 impl<G: Successors + ?Sized> Successors for &G {
     fn successors(&self, node: Self::Node) -> impl ExactSizeIterator<Item = Self::Node> {
         (*self).successors(node)
+    }
+}
+
+impl<'a, G: Dfs + ?Sized> Dfs for &'a G {
+    fn dfs(&self) -> impl Iterator<Item = NodeVisit<Self::Node>> + use<'_, 'a, G> {
+        (*self).dfs()
     }
 }
 
@@ -121,74 +137,6 @@ where
     idom
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DFSVisit<N> {
-    pub node: N,
-    pub exit: bool,
-}
-
-pub fn dfs<G: EntryNode + Successors>(g: &G) -> DFS<'_, G> {
-    DFS::new(g)
-}
-
-pub struct DFS<'a, G: Graph + ?Sized> {
-    graph: &'a G,
-    flags: BitSet,
-    buffer: Vec<G::Node>,
-}
-
-impl<'a, G: EntryNode + Successors> DFS<'a, G> {
-    fn new(graph: &'a G) -> Self {
-        let n = graph.node_count();
-        let mut flags = BitSet::new(2 * n);
-        let mut buffer = Vec::with_capacity(n);
-
-        let entry = graph.entry();
-        flags.insert(2 * entry.index() + 1);
-        buffer.push(entry);
-
-        Self { graph, flags, buffer }
-    }
-}
-
-impl<G: EntryNode + Successors> Iterator for DFS<'_, G> {
-    type Item = DFSVisit<G::Node>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let &node = self.buffer.last()?;
-        if self.flags.insert(2 * node.index()) {
-            for succ in self.graph.successors(node) {
-                if self.flags.insert(2 * succ.index() + 1) {
-                    self.buffer.push(succ);
-                }
-            }
-            Some(DFSVisit { node, exit: false })
-        } else {
-            self.buffer.pop();
-            Some(DFSVisit { node, exit: true })
-        }
-    }
-}
-
-pub fn dfs_intervals<G: EntryNode + Successors>(g: &G) -> Box<[Range<usize>]> {
-    let n = g.node_count();
-
-    let mut ranges = vec![0..0; n].into_boxed_slice();
-    let mut time = 0;
-
-    for visit in dfs(g) {
-        let node = visit.node;
-        if !visit.exit {
-            ranges[node.index()].start = time;
-            time += 1;
-        } else {
-            ranges[node.index()].end = time;
-        }
-    }
-
-    ranges
-}
-
 pub fn transpose<G>(g: G) -> Transpose<G> {
     Transpose { inner: g }
 }
@@ -236,7 +184,7 @@ impl<N> Default for EdgeArray<N> {
 }
 
 impl<N: Idx> EdgeArray<N> {
-    pub fn edges_from(&self, node: N) -> impl ExactSizeIterator<Item = N> {
+    pub fn edges_from(&self, node: N) -> &[N] {
         let index = node.index();
         let start = self.node_starts[index];
         let end = self
@@ -244,7 +192,7 @@ impl<N: Idx> EdgeArray<N> {
             .get(index + 1)
             .copied()
             .unwrap_or(self.edge_targets.len());
-        self.edge_targets[start..end].iter().copied()
+        &self.edge_targets[start..end]
     }
 }
 
@@ -252,6 +200,8 @@ pub struct Tree<N> {
     root: N,
     parents: Box<[Option<N>]>,
     children: EdgeArray<N>,
+    intervals: Box<[(usize, usize)]>,
+    height: usize,
 }
 
 impl<N: Idx> Tree<N> {
@@ -261,14 +211,47 @@ impl<N: Idx> Tree<N> {
             root,
             parents,
             children: EdgeArray::default(),
+            intervals: Box::new([]),
+            height: 0,
         };
         tree.children = predecessor_edges(transpose(&tree));
+        (tree.intervals, tree.height) = dfs_intervals(&tree);
         tree
     }
 
     pub fn parent(&self, node: N) -> Option<N> {
         self.parents[node.index()]
     }
+
+    pub fn is_ancestor(&self, a: N, b: N) -> bool {
+        let (a_start, a_end) = self.intervals[a.index()];
+        let (b_start, b_end) = self.intervals[b.index()];
+        a_start <= b_start && b_end <= a_end
+    }
+}
+
+fn dfs_intervals<G: Dfs>(g: &G) -> (Box<[(usize, usize)]>, usize) {
+    let n = g.node_count();
+
+    let mut ranges = vec![(0, 0); n].into_boxed_slice();
+    let mut time = 0;
+    let mut depth = 0;
+    let mut height = 0;
+
+    for visit in g.dfs() {
+        let node = visit.node;
+        if !visit.exit {
+            ranges[node.index()].0 = time;
+            time += 1;
+            depth += 1;
+            height = height.max(depth);
+        } else {
+            ranges[node.index()].1 = time;
+            depth -= 1;
+        }
+    }
+
+    (ranges, height)
 }
 
 impl<N: Idx> Graph for Tree<N> {
@@ -291,13 +274,35 @@ impl<N: Idx> EntryNode for Tree<N> {
 
 impl<N: Idx> Successors for Tree<N> {
     fn successors(&self, node: Self::Node) -> impl ExactSizeIterator<Item = Self::Node> {
-        self.children.edges_from(node)
+        self.children.edges_from(node).iter().copied()
     }
 }
 
 impl<N: Idx> Predecessors for Tree<N> {
     fn predecessors(&self, node: Self::Node) -> impl ExactSizeIterator<Item = Self::Node> {
         self.parents[node.index()].into_iter()
+    }
+}
+
+impl<N: Idx> Dfs for Tree<N> {
+    fn dfs(&self) -> impl Iterator<Item = NodeVisit<Self::Node>> {
+        let mut stack = Vec::with_capacity(self.height);
+        iter::successors(Some(NodeVisit { node: self.entry(), exit: false }), move |&visit| {
+            let node = if visit.exit {
+                stack.pop();
+                self.parent(visit.node)?
+            } else {
+                stack.push(0);
+                visit.node
+            };
+            let i = stack.last_mut().unwrap();
+            if let Some(&succ) = self.children.edges_from(node).get(*i) {
+                *i += 1;
+                Some(NodeVisit { node: succ, exit: false })
+            } else {
+                Some(NodeVisit { node, exit: true })
+            }
+        })
     }
 }
 
@@ -480,59 +485,15 @@ pub mod tests {
         ]);
         let preds = predecessor_edges(&g);
 
-        let preds_0: Vec<_> = preds.edges_from(0).collect();
-        let preds_1: Vec<_> = preds.edges_from(1).collect();
-        let preds_2: Vec<_> = preds.edges_from(2).collect();
-        let preds_3: Vec<_> = preds.edges_from(3).collect();
+        let preds_0 = preds.edges_from(0);
+        let preds_1 = preds.edges_from(1);
+        let preds_2 = preds.edges_from(2);
+        let preds_3 = preds.edges_from(3);
 
         assert!(preds_0.is_empty());
-        assert_eq!(preds_1, vec![0]);
-        assert_eq!(preds_2, vec![1]);
-        assert_eq!(preds_3, vec![1]);
-    }
-
-    #[test]
-    fn test_dfs() {
-        // 0 → 1 → 2
-        //   ↘ 3
-        let g = TestGraph::new(&[
-            (0, 1),
-            (1, 2),
-            (0, 3),
-        ]);
-
-        let visits: Vec<_> = dfs(&g).collect();
-
-        assert_eq!(
-            visits,
-            vec![
-                DFSVisit { node: 0, exit: false },
-                DFSVisit { node: 3, exit: false },
-                DFSVisit { node: 3, exit: true },
-                DFSVisit { node: 1, exit: false },
-                DFSVisit { node: 2, exit: false },
-                DFSVisit { node: 2, exit: true },
-                DFSVisit { node: 1, exit: true },
-                DFSVisit { node: 0, exit: true },
-            ]
-        );
-    }
-
-    #[test]
-    fn test_postorder_matches_dfs_exit_order() {
-        // 0 → 1 → 2
-        //   ↘ 3
-        let g = TestGraph::new(&[
-            (0, 1),
-            (1, 2),
-            (0, 3),
-        ]);
-
-        let expected: Vec<_> = dfs(&g)
-            .filter_map(|visit| visit.exit.then_some(visit.node))
-            .collect();
-
-        assert_eq!(&*postorder(&g), expected.as_slice());
+        assert_eq!(preds_1, &[0]);
+        assert_eq!(preds_2, &[1]);
+        assert_eq!(preds_3, &[1]);
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use std::{collections::{HashMap, HashSet, hash_map::Entry}, hash::Hash};
-use crate::graph::{EntryNode, Graph, Idx, NodeOrdering, Predecessors, Successors, Tree, dfs_intervals};
+use crate::graph::{EntryNode, Graph, Idx, NodeOrdering, Predecessors, Successors, Tree};
 use crate::utils::BitSet;
 
 pub trait Procedure {
@@ -143,18 +143,11 @@ where
     let cfg = proc.cfg();
     let n = cfg.node_count();
 
-    let dom_intervals = dfs_intervals(dom_tree);
-    let dominates = |a: P::BlockId, b: P::BlockId| {
-        let ra = &dom_intervals[a.index()];
-        let rb = &dom_intervals[b.index()];
-        ra.start <= rb.start && rb.end <= ra.end
-    };
-
     let mut pins: Box<[HashSet<P::BlockId>]> = vec![HashSet::new(); n].into_boxed_slice();
 
     for b in postorder.iter() {
         for t in cfg.successors(b) {
-            if b == t || !dominates(b, t) {
+            if b == t || !dom_tree.is_ancestor(b, t) {
                 pins[b.index()].insert(t);
             }
         }
