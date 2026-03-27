@@ -1,6 +1,14 @@
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stack<T> {
-    contents: Vec<Option<T>>,
+    contents: Vec<T>,
+}
+
+impl<T> Default for Stack<T> {
+    fn default() -> Self {
+        Self {
+            contents: Vec::new(),
+        }
+    }
 }
 
 impl<T: Copy + Eq> Stack<T> {
@@ -14,7 +22,7 @@ impl<T: Copy + Eq> Stack<T> {
         self.contents.len()
     }
 
-    pub fn push(&mut self, x: Option<T>) {
+    pub fn push(&mut self, x: T) {
         self.contents.push(x);
     }
 
@@ -23,16 +31,16 @@ impl<T: Copy + Eq> Stack<T> {
         self.contents.truncate(self.len() - count);
     }
 
-    pub fn read(&self, depth: usize) -> Option<T> {
-        let top = self.len().checked_sub(1)?;
-        let index = top.checked_sub(depth)?;
-        self.contents.get(index).copied().flatten()
+    pub fn read(&self, depth: usize) -> T {
+        let top = self.len() - 1;
+        let index = top - depth;
+        self.contents[index]
     }
 
     pub fn depth(&self, x: T) -> usize {
         let index = self.contents
             .iter()
-            .rposition(|y| y.as_ref().is_some_and(|&y| y == x))
+            .rposition(|&y| y == x)
             .unwrap();
         self.len() - 1 - index
     }
@@ -44,14 +52,14 @@ impl<T: Copy + Eq> Stack<T> {
         self.contents.swap(index, top);
     }
 
-    pub fn contents(&self) -> &[Option<T>] {
+    pub fn contents(&self) -> &[T] {
         &self.contents
     }
 }
 
 impl<T: Copy + Eq> Extend<T> for Stack<T> {
     fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
-        self.contents.extend(iter.into_iter().map(Some));
+        self.contents.extend(iter.into_iter());
     }
 }
 
@@ -67,8 +75,8 @@ mod tests {
     #[test]
     fn push_increases_len() {
         let mut s: Stack<u8> = Stack::new();
-        s.push(Some(1));
-        s.push(None);
+        s.push(1);
+        s.push(2);
         assert_eq!(s.len(), 2);
     }
 
@@ -85,16 +93,16 @@ mod tests {
         s.extend([1, 2, 3]);
         s.popn(2);
         assert_eq!(s.len(), 1);
-        assert_eq!(s.read(0), Some(1));
+        assert_eq!(s.read(0), 1);
     }
 
     #[test]
     fn read_returns_item_at_depth() {
         let mut s: Stack<u8> = Stack::new();
         s.extend([10, 20, 30]);
-        assert_eq!(s.read(0), Some(30)); // top
-        assert_eq!(s.read(1), Some(20));
-        assert_eq!(s.read(2), Some(10)); // bottom
+        assert_eq!(s.read(0), 30); // top
+        assert_eq!(s.read(1), 20);
+        assert_eq!(s.read(2), 10); // bottom
     }
 
     #[test]
@@ -102,8 +110,8 @@ mod tests {
         let mut s: Stack<u8> = Stack::new();
         s.extend([1, 2, 3]);
         s.swap(2);
-        assert_eq!(s.read(0), Some(1));
-        assert_eq!(s.read(2), Some(3));
+        assert_eq!(s.read(0), 1);
+        assert_eq!(s.read(2), 3);
     }
 
     #[test]
@@ -120,14 +128,14 @@ mod tests {
         let mut s: Stack<u8> = Stack::new();
         s.extend([1, 2]);
         s.swap(0);
-        assert_eq!(s.read(0), Some(2));
-        assert_eq!(s.read(1), Some(1));
+        assert_eq!(s.read(0), 2);
+        assert_eq!(s.read(1), 1);
     }
 
     #[test]
     fn swap_with_none() {
-        let mut s: Stack<u8> = Stack::new();
-        s.extend([1, 2]);
+        let mut s: Stack<Option<u8>> = Stack::new();
+        s.extend([Some(1), Some(2)]);
         s.push(None);
         s.swap(2);
         assert_eq!(s.read(0), Some(1));
