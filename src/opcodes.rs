@@ -1,5 +1,17 @@
 use std::{collections::HashMap, sync::LazyLock};
 
+pub const MLOAD: u8 = 0x51;
+pub const MSTORE: u8 = 0x52;
+pub const STOP: u8 = 0x00;
+pub const JUMP: u8 = 0x56;
+pub const JUMPI: u8 = 0x57;
+pub const POP: u8 = 0x50;
+pub const JUMPDEST: u8 = 0x5b;
+pub const PUSH0: u8 = 0x5f;
+pub const PUSH2: u8 = 0x61;
+pub const DUP1: u8 = 0x80;
+pub const SWAP1: u8 = 0x90;
+
 #[derive(Clone, Copy)]
 pub struct OpcodeInfo<N = u8> {
     pub inputs: N,

@@ -1,6 +1,5 @@
 use std::{collections::HashMap, iter::once};
-use crate::{asm, id::Id, utils::exact_size_chain};
-use revm::bytecode::opcode;
+use crate::{asm, id::Id, opcodes, utils::exact_size_chain};
 
 pub fn assemble(code: &[asm::Instr]) -> Vec<u8> {
     use asm::Instr::*;
@@ -27,7 +26,7 @@ pub fn assemble(code: &[asm::Instr]) -> Vec<u8> {
     let mut bytecode = Vec::with_capacity(code.len());
     for instr in code {
         match instr {
-            Pop => bytecode.push(opcode::POP),
+            Pop => bytecode.push(opcodes::POP),
             Push(value) => bytecode.extend(instruction_push(value.to_be_bytes::<32>())),
             Swap(depth) => bytecode.push(opcode_swap(*depth)),
             Dup(depth) => bytecode.push(opcode_dup(*depth)),
@@ -35,17 +34,17 @@ pub fn assemble(code: &[asm::Instr]) -> Vec<u8> {
             JumpDest(id) => {
                 let expected = label_offsets[id];
                 assert!(bytecode.len() == expected);
-                bytecode.push(opcode::JUMPDEST);
+                bytecode.push(opcodes::JUMPDEST);
             }
             PushLabel(id) => {
                 let offset = label_offsets[id];
                 let offset: u16 = offset.try_into().unwrap();
-                bytecode.push(opcode::PUSH2);
+                bytecode.push(opcodes::PUSH2);
                 bytecode.extend(offset.to_be_bytes());
             }
-            JumpIf => bytecode.push(opcode::JUMPI),
-            Jump => bytecode.push(opcode::JUMP),
-            Stop => bytecode.push(opcode::STOP),
+            JumpIf => bytecode.push(opcodes::JUMPI),
+            Jump => bytecode.push(opcodes::JUMP),
+            Stop => bytecode.push(opcodes::STOP),
         }
     }
     bytecode
@@ -54,12 +53,12 @@ pub fn assemble(code: &[asm::Instr]) -> Vec<u8> {
 fn opcode_swap(depth: usize) -> u8 {
     assert!(depth > 0, "can't swap top of stack");
     assert!(depth <= 16, "stack too deep");
-    opcode::SWAP1 + (depth - 1) as u8
+    opcodes::SWAP1 + (depth - 1) as u8
 }
 
 fn opcode_dup(depth: usize) -> u8 {
     assert!(depth < 16, "stack too deep");
-    opcode::DUP1 + depth as u8
+    opcodes::DUP1 + depth as u8
 }
 
 fn instruction_push<const N: usize>(value: [u8; N]) -> impl ExactSizeIterator<Item = u8> {
@@ -67,7 +66,7 @@ fn instruction_push<const N: usize>(value: [u8; N]) -> impl ExactSizeIterator<It
     let mut value = value.into_iter().peekable();
     while value.next_if_eq(&0).is_some() {}
     exact_size_chain(
-        once(opcode::PUSH0 + value.len() as u8),
+        once(opcodes::PUSH0 + value.len() as u8),
         value,
     )
 }
