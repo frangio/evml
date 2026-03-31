@@ -218,7 +218,7 @@ mod tests {
     }
 
     #[test]
-    fn test_e2e_op_args_eval_left_to_right() {
+    fn test_e2e_args_left_to_right() {
         assert_e2e_result(U256::from(12), r#"
             fn main() -> u256 {
                 let _ = @mstore(0, 5);
