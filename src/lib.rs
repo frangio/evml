@@ -186,7 +186,7 @@ mod tests {
     fn test_e2e_if_without_else() {
         assert_e2e_result(U256::from(42), r#"
             fn main() -> u256 {
-                let _ = if 1 { @mstore(0, 42) };
+                if 1 { @mstore(0, 42) };
                 @mload(0)
             }
         "#);
@@ -221,12 +221,12 @@ mod tests {
     fn test_e2e_args_left_to_right() {
         assert_e2e_result(U256::from(12), r#"
             fn main() -> u256 {
-                let _ = @mstore(0, 5);
+                @mstore(0, 5);
                 @add(store_and_return_old(7), store_and_return_old(11))
             }
             fn store_and_return_old(x) -> u256 {
                 let old = @mload(0);
-                let _ = @mstore(0, x);
+                @mstore(0, x);
                 old
             }
         "#);
@@ -236,13 +236,13 @@ mod tests {
     fn test_e2e_apply_args_eval_left_to_right() {
         assert_e2e_result(U256::from(12), r#"
             fn main() -> u256 {
-                let _ = @mstore(0, 5);
+                @mstore(0, 5);
                 add(store_and_return_old(7), store_and_return_old(11))
             }
             fn add(a, b) -> u256 { @add(a, b) }
             fn store_and_return_old(x) -> u256 {
                 let old = @mload(0);
-                let _ = @mstore(0, x);
+                @mstore(0, x);
                 old
             }
         "#);
@@ -269,11 +269,21 @@ mod tests {
     fn test_e2e_void_proc() {
         assert_e2e_result(U256::from(99), r#"
             fn main() -> u256 {
-                let _ = store(99);
+                store(99);
                 @mload(0)
             }
             fn store(x) { @mstore(0, x) }
         "#);
+    }
+
+    #[test]
+    fn test_e2e_expr_statement_requires_void() {
+        assert!(compile_from_source(r#"
+            fn main() -> u256 {
+                1;
+                2
+            }
+        "#).is_err());
     }
 
     #[test]

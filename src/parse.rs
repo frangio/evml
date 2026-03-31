@@ -75,10 +75,14 @@ pub fn parse(source: &str) -> Result<ast::Program<&str>> {
                 )
                 .padded()
                 .then_ignore(just('='))
-                .then(expr.clone())
+                .then(expr.clone());
+
+            let block_expr = expr.clone().map(|expr| (None, expr));
+
+            let block_stmt = choice((block_let, block_expr))
                 .then_ignore(just(';'));
 
-            block_let
+            block_stmt
                 .padded()
                 .repeated()
                 .collect()
