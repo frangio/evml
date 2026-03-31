@@ -69,6 +69,14 @@ impl<T: Copy + Eq> Extend<T> for Stack<T> {
     }
 }
 
+impl<T: Copy + Eq> FromIterator<T> for Stack<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        let mut stack = Self::new();
+        stack.extend(iter);
+        stack
+    }
+}
+
 impl<T> Index<usize> for Stack<T> {
     type Output = T;
     fn index(&self, depth: usize) -> &T {

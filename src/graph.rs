@@ -223,10 +223,27 @@ impl<N: Idx> Tree<N> {
         self.parents[node.index()]
     }
 
+    pub fn height(&self) -> usize {
+        self.height
+    }
+
     pub fn is_ancestor(&self, a: N, b: N) -> bool {
         let (a_start, a_end) = self.intervals[a.index()];
         let (b_start, b_end) = self.intervals[b.index()];
         a_start <= b_start && b_end <= a_end
+    }
+
+    pub fn nca(&self, mut lhs: N, mut rhs: N) -> N {
+        loop {
+            if self.is_ancestor(lhs, rhs) {
+                return lhs;
+            }
+            if self.is_ancestor(rhs, lhs) {
+                return rhs;
+            }
+            lhs = self.parent(lhs).unwrap();
+            rhs = self.parent(rhs).unwrap();
+        }
     }
 }
 

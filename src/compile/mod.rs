@@ -4,11 +4,14 @@ use std::mem::{replace, take};
 use std::num::NonZero;
 use std::slice;
 
+use crate::compile::plan::Action;
 use crate::utils::exact_size_chain;
 use crate::{asm, core};
 use crate::id::{Id, IdGen};
 use crate::analysis::{self, Cfg, DefUse, Procedure, liveness};
 use crate::graph::{EdgeArray, EntryNode, Graph, Idx, NodeOrdering, Predecessors, Successors, Tree, idom, predecessor_edges};
+use crate::opcodes;
+use crate::U256;
 
 mod plan;
 
@@ -65,28 +68,26 @@ fn emit_block(
         code.push(asm::Instr::JumpDest(label));
     }
 
-    let mut block_actions = block_plan.actions();
-
-    for ((_, expr), actions) in zip(block.priors(), &mut block_actions) {
+    for ((_, expr), actions) in zip(block.priors(), block_plan.prior_actions()) {
         let ret = emit_actions(actions, ids, code);
         emit_expr(expr, code);
         if let Some(ret) = ret {
             code.push(asm::Instr::JumpDest(ret));
         }
     }
-
-    let cont_actions = block_actions.next().unwrap();
-    assert!(block_actions.next().is_none());
-
-    emit_actions(cont_actions, ids, code);
+    emit_actions(block_plan.cont_actions(), ids, code);
     emit_cont(&block.data().cont, fallthrough_label, code);
 }
 
-fn emit_actions(actions: &[plan::Action], ids: &mut IdGen, code: &mut Vec<asm::Instr>) -> Option<Id> {
+fn emit_actions(
+    actions: impl IntoIterator<Item = Action>,
+    ids: &mut IdGen,
+    code: &mut Vec<asm::Instr>,
+) -> Option<Id> {
     use asm::Instr;
     use plan::Action;
     let mut ret = None;
-    for &action in actions {
+    for action in actions {
         match action {
             Action::Pop => {
                 code.push(Instr::Pop);
@@ -94,6 +95,14 @@ fn emit_actions(actions: &[plan::Action], ids: &mut IdGen, code: &mut Vec<asm::I
             Action::PushLabel => {
                 let ret = *ret.get_or_insert_with(|| ids.generate());
                 code.push(Instr::PushLabel(ret));
+            }
+            Action::Rload(register) => {
+                code.push(Instr::Push(U256::from(register * 32)));
+                code.push(Instr::Op(opcodes::MLOAD));
+            }
+            Action::Rstore(register) => {
+                code.push(Instr::Push(U256::from(register * 32)));
+                code.push(Instr::Op(opcodes::MSTORE));
             }
             Action::Swap(depth) => {
                 code.push(Instr::Swap(depth));
@@ -158,8 +167,8 @@ fn emit_cont(
     }
 }
 
-type BlockLiveness = analysis::BlockLiveness<Id>;
-type BlockPinning = analysis::Pinning<Id>;
+pub type BlockLiveness = analysis::BlockLiveness<Id>;
+pub type BlockPinning = analysis::Pinning<Id>;
 
 pub fn analyze(proc: &ProcCfg) -> ProcAnalysis {
     let postorder = proc.postorder();
@@ -176,15 +185,15 @@ pub struct ProcAnalysis {
 }
 
 impl ProcAnalysis {
-    fn liveness(&self, block_id: CfgId) -> &BlockLiveness {
+    pub fn liveness(&self, block_id: CfgId) -> &BlockLiveness {
         &self.liveness[block_id.index()]
     }
 
-    fn pinning(&self, block_id: CfgId) -> &BlockPinning {
+    pub fn pinning(&self, block_id: CfgId) -> &BlockPinning {
         &self.pinning[block_id.index()]
     }
 
-    fn dom_tree(&self) -> &Tree<CfgId> {
+    pub fn dom_tree(&self) -> &Tree<CfgId> {
         &self.dom_tree
     }
 }
@@ -578,8 +587,7 @@ impl Graph for ProcCfg {
     }
 
     fn nodes(&self) -> impl Iterator<Item = Self::Node> {
-        let postorder = self.postorder();
-        postorder.iter()
+        (0..self.blocks.len()).map(CfgId::new)
     }
 }
 
