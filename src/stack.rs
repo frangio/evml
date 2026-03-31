@@ -1,3 +1,5 @@
+use std::ops::{Index, IndexMut};
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stack<T> {
     contents: Vec<T>,
@@ -37,6 +39,10 @@ impl<T: Copy + Eq> Stack<T> {
         self.contents[index]
     }
 
+    pub fn read_base(&self, index: usize) -> T {
+        self.contents[index]
+    }
+
     pub fn depth(&self, x: T) -> usize {
         let index = self.contents
             .iter()
@@ -60,6 +66,21 @@ impl<T: Copy + Eq> Stack<T> {
 impl<T: Copy + Eq> Extend<T> for Stack<T> {
     fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
         self.contents.extend(iter.into_iter());
+    }
+}
+
+impl<T> Index<usize> for Stack<T> {
+    type Output = T;
+    fn index(&self, depth: usize) -> &T {
+        let index = self.contents.len() - 1 - depth;
+        &self.contents[index]
+    }
+}
+
+impl<T> IndexMut<usize> for Stack<T> {
+    fn index_mut(&mut self, depth: usize) -> &mut T {
+        let index = self.contents.len() - 1 - depth;
+        &mut self.contents[index]
     }
 }
 

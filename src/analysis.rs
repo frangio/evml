@@ -117,6 +117,10 @@ pub struct Pinning<V> {
 }
 
 impl<V: Copy + Eq + Hash> Pinning<V> {
+    pub fn is_unpinned(&self, var: V) -> bool {
+        !self.pinned.contains_key(&var)
+    }
+
     pub fn is_pinned_out(&self, var: V) -> bool {
         self.pinned.get(&var) == Some(&PinState::PinOut)
     }

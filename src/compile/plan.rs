@@ -1,6 +1,6 @@
+use std::cmp::max;
 use std::collections::HashMap;
 use std::iter::{repeat_n, zip};
-use std::ops::Range;
 
 use smallvec::SmallVec;
 
@@ -125,36 +125,46 @@ fn plan_cont(
     last_use: &HashMap<Id, InstrIdx>,
     bp: &mut BlockPlan,
 ) {
-    let mut move_candidates = collect_cont_move_candidates(&bp.stack, liveness, pinning, last_use);
+    let is_live = |x| liveness.live_out(x) || last_use.get(&x) == Some(&InstrIdx::Cont);
 
-    while let Some((from_kind, from_index)) = move_candidates.next() {
-        if from_kind == ContMoveKind::Dead {
-            let top_index = bp.stack.len() - 1;
-            if from_index < top_index {
-                let from_depth = top_index - from_index;
-                bp.actions.push(Action::Swap(from_depth));
-                bp.stack.swap(from_depth);
-            }
+    let topmost_pinned_through = bp.stack.contents()
+        .iter()
+        .rposition(|&x| x.is_some_and(|x| pinning.is_pinned_through(x)));
+    let count_live = bp.stack.contents()
+        .iter()
+        .filter(|&x| x.is_some_and(is_live))
+        .count();
+    let target_height = max(count_live, topmost_pinned_through.map_or(0, |i| i + 1));
+
+    let count_unpinned = bp.stack.contents()
+        .iter()
+        .filter(|&x| x.is_some_and(|x| is_live(x) && pinning.is_unpinned(x)))
+        .count();
+
+    let is_movable = |x: Option<Id>| x.is_none_or(|x| !pinning.is_pinned_through(x));
+
+    let mut next_unpinned = (0..target_height).rev();
+    let last_unpinned = next_unpinned
+        .clone()
+        .filter(|&i| is_movable(bp.stack.read_base(i)))
+        .take(count_unpinned)
+        .last();
+    let mut next_pinout = (0..last_unpinned.unwrap_or(0)).rev();
+
+    while bp.stack.len() > target_height {
+        if let Some(x) = bp.stack[0] && is_live(x) {
+            let index =
+                if pinning.is_pinned_out(x) {
+                    next_pinout.find(|&i| is_movable(bp.stack.read_base(i))).unwrap()
+                } else {
+                    next_unpinned.find(|&i| is_movable(bp.stack.read_base(i))).unwrap()
+                };
+            let depth = bp.stack.len() - 1 - index;
+            bp.actions.push(Action::Swap(depth));
+            bp.stack.swap(depth);
+        } else {
             bp.actions.push(Action::Pop);
             bp.stack.popn(1);
-        } else if from_kind == ContMoveKind::PinOut
-            && let Some((to_kind, to_index)) =
-                move_candidates.rfind(|&(k, _)| k != ContMoveKind::PinOut)
-        {
-            debug_assert!(to_index < from_index);
-            let top_index = bp.stack.len() - 1;
-            if from_index < top_index {
-                let from_depth = top_index - from_index;
-                bp.actions.push(Action::Swap(from_depth));
-                bp.stack.swap(from_depth);
-            }
-            let to_depth = top_index - to_index;
-            bp.actions.push(Action::Swap(to_depth));
-            bp.stack.swap(to_depth);
-            if to_kind == ContMoveKind::Dead {
-                bp.actions.push(Action::Pop);
-                bp.stack.popn(1);
-            }
         }
     }
 
@@ -181,75 +191,6 @@ fn plan_cont(
             bp.stack.popn(1);
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ContMoveKind {
-    PinOut,
-    Unpinned,
-    Dead,
-}
-
-fn collect_cont_move_candidates(
-    stack: &Stack<Option<Id>>,
-    liveness: &BlockLiveness,
-    pinning: &BlockPinning,
-    last_use: &HashMap<Id, InstrIdx>,
-) -> impl DoubleEndedIterator<Item = (ContMoveKind, usize)> + use<> {
-    struct Segment {
-        kind: ContMoveKind,
-        range: Range<usize>,
-    }
-
-    let mut segments: Vec<Segment> = vec![];
-    let mut unmatched_pinouts = 0usize;
-    let mut below_pinned_through = false;
-
-    for (index, &slot) in stack.contents().iter().enumerate().rev() {
-        if below_pinned_through && unmatched_pinouts == 0 {
-            break;
-        }
-
-        let kind = match slot {
-            Some(x) if pinning.is_pinned_through(x) => {
-                below_pinned_through = true;
-                continue;
-            }
-            Some(x) if pinning.is_pinned_out(x) => {
-                if below_pinned_through {
-                    continue;
-                }
-                unmatched_pinouts += 1;
-                ContMoveKind::PinOut
-            }
-            _ => {
-                if below_pinned_through {
-                    unmatched_pinouts -= 1;
-                }
-                if let Some(x) = slot && (liveness.live_out(x) || last_use.get(&x) == Some(&InstrIdx::Cont)) {
-                    ContMoveKind::Unpinned
-                } else {
-                    ContMoveKind::Dead
-                }
-            }
-        };
-
-        if let Some(segment) = segments.last_mut()
-            && segment.kind == kind
-            && segment.range.start == index + 1
-        {
-            segment.range.start = index;
-        } else {
-            segments.push(Segment {
-                kind,
-                range: index..index + 1,
-            });
-        }
-    }
-
-    segments
-        .into_iter()
-        .flat_map(|segment| segment.range.rev().map(move |i| (segment.kind, i)))
 }
 
 fn plan_expr(
