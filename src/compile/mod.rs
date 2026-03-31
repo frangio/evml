@@ -136,12 +136,12 @@ fn emit_cont(
 ) {
     use asm::*;
     match *cont {
-        Cont::Stop(_) => {
-            code.push(Instr::Stop);
-        }
-
-        Cont::Ret(_) => {
-            code.push(Instr::Jump);
+        Cont::Ret { target_var, .. } => {
+            if target_var.is_some() {
+                code.push(Instr::Jump);
+            } else {
+                code.push(Instr::Stop);
+            }
         }
 
         Cont::Jump(target, _) => {
@@ -204,6 +204,7 @@ impl Idx for CfgId {
 
 pub struct ProcCfg {
     args: Box<[Id]>,
+    ret_target_var: Option<Id>,
     blocks: Box<[BasicBlock]>,
     segments: Box<[Box<[(Option<Id>, core::Expr)]>]>,
     labeled_blocks: HashMap<Id, usize>,
@@ -222,13 +223,16 @@ struct BasicBlock {
 
 #[derive(PartialEq, Eq, Debug)]
 enum Cont {
-    Ret(Option<Id>),
-    Stop(Option<Id>),
+    Ret { target_var: Option<Id>, value: Option<Id> },
     Jump(Id, Box<[Id]>),
     JumpIf { cond: Id, then: Id },
 }
 
 impl ProcCfg {
+    fn ret_target_var(&self) -> Option<Id> {
+        self.ret_target_var
+    }
+
     pub fn block(&self, block_id: CfgId) -> BasicBlockRef<'_> {
         BasicBlockRef {
             id: block_id,
@@ -246,7 +250,7 @@ impl ProcCfg {
 
     fn successor_blocks(&self, block_id: CfgId) -> impl ExactSizeIterator<Item = CfgId> {
         let (target, fallthrough) = match &self.block(block_id).data().cont {
-            Cont::Stop(_) | Cont::Ret(_) => (None, None),
+            Cont::Ret { .. } => (None, None),
             Cont::Jump(target, _) => (
                 // Target may be another procedure if this is a tail call
                 self.labeled_blocks.get(target).map(|&i| CfgId::new(i)),
@@ -396,6 +400,7 @@ fn build_cfg(proc: core::Proc, stop: bool, ids: &mut IdGen) -> ProcCfg {
     use core::*;
 
     let Proc { args, body, rets } = proc;
+    let ret_target_var = (!stop).then(|| ids.generate());
 
     enum QueueItem {
         Finished(BasicBlock),
@@ -475,9 +480,9 @@ fn build_cfg(proc: core::Proc, stop: bool, ids: &mut IdGen) -> ProcCfg {
                                 };
                                 cont_label.map_or(
                                     if stop {
-                                        Cont::Stop(res)
+                                        Cont::Ret { target_var: None, value: res }
                                     } else {
-                                        Cont::Ret(res)
+                                        Cont::Ret { target_var: ret_target_var, value: res }
                                     },
                                     |cont| Cont::Jump(cont, res.into_iter().collect()),
                                 )
@@ -555,6 +560,7 @@ fn build_cfg(proc: core::Proc, stop: bool, ids: &mut IdGen) -> ProcCfg {
 
     let mut cfg = ProcCfg {
         args,
+        ret_target_var,
         segments: segments.into_boxed_slice(),
         preds: EdgeArray::default(),
         blocks: blocks.into_boxed_slice(),
@@ -617,24 +623,12 @@ impl Procedure for ProcCfg {
     ) -> impl DoubleEndedIterator<Item = (InstrIdx, Id, DefUse)> {
         use core::*;
 
-        fn instrs<'a>(
-            idx: InstrIdx,
-            def_use: DefUse,
-            ids: &'a [Id],
-        ) -> impl DoubleEndedIterator<Item = (InstrIdx, Id, DefUse)> + use<'a> {
-            ids.iter().map(move |&id| (idx, id, def_use))
-        }
-
         let block = self.block(b);
         let input_defs = block
             .inputs()
             .iter()
             .map(|&id| (InstrIdx::Input, id, DefUse::Def));
-        let cont_ids: &[Id] = match &block.data().cont {
-            Cont::Stop(x) | Cont::Ret(x) => x.as_slice(),
-            Cont::Jump(_, args) => args,
-            Cont::JumpIf { cond, .. } => slice::from_ref(cond),
-        };
+
         let priors = block.priors();
 
         let prior_def_uses = priors.iter().enumerate().flat_map(|(i, (def, expr))| {
@@ -646,11 +640,22 @@ impl Procedure for ProcCfg {
                 Expr::Apply(_, args) => args,
                 Expr::IfThenElse(id, _) => slice::from_ref(id),
             };
-            let uses_iter = instrs(InstrIdx::Prior(i), DefUse::Use, ids);
+            let uses_iter = ids.iter().map(move |&id| (InstrIdx::Prior(i), id, DefUse::Use));
             chain(def_iter, uses_iter)
         });
 
-        let cont_uses = instrs(InstrIdx::Cont, DefUse::Use, cont_ids);
+        let (cont_args, cont_target_var) = match &block.data().cont {
+            Cont::Ret { target_var, value } => (value.as_slice(), *target_var),
+            Cont::Jump(target, args) => {
+                let tail_call = !self.labeled_blocks.contains_key(target);
+                (args.as_ref(), tail_call.then_some(self.ret_target_var).flatten())
+            }
+            Cont::JumpIf { cond, .. } => (slice::from_ref(cond), None),
+        };
+        let cont_uses = exact_size_chain(
+            cont_args.iter().copied(),
+            cont_target_var,
+        ).map(|id| (InstrIdx::Cont, id, DefUse::Use));
 
         chain(input_defs, prior_def_uses).chain(cont_uses)
     }

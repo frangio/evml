@@ -10,7 +10,7 @@ use crate::compile::{
 };
 use crate::id::Id;
 use crate::analysis::Procedure;
-use crate::graph::{Dfs, Idx, Predecessors, Successors};
+use crate::graph::{Dfs, EntryNode, Idx, Predecessors, Successors};
 use crate::stack::Stack;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,6 +46,10 @@ impl BlockPlan {
 pub fn plan_proc(proc: &ProcCfg) -> Box<[BlockPlan]> {
     let analysis = analyze(proc);
     let mut block_contexts: Box<[BlockPlan]> = vec![BlockPlan::default(); proc.blocks.len()].into_boxed_slice();
+
+    if let Some(ret_target_var) = proc.ret_target_var() {
+        block_contexts[proc.entry().index()].stack.push(Some(ret_target_var));
+    }
 
     let dom_tree = analysis.dom_tree();
 
@@ -171,12 +175,9 @@ fn plan_cont(
     let should_move = |x: Id| !liveness.live_out(x) && last_use[&x] == InstrIdx::Cont;
 
     match *cont {
-        Cont::Stop(_) => {}
-
-        Cont::Ret(x) => {
-            let offset = x.is_some() as usize;
-            if offset > 0 {
-                bp.actions.push(Action::Swap(offset));
+        Cont::Ret { target_var, value } => {
+            if target_var.is_some() && value.is_some() {
+                bp.actions.push(Action::Swap(1));
             }
         }
 
