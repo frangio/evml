@@ -116,7 +116,7 @@ pub fn plan_proc(proc: &ProcCfg) -> Box<[BlockPlan]> {
             spill_stack.popn(block_contexts[block_id.index()].dead_count);
             spill_stack.extend(repeat_n(None, block.inputs().len()));
 
-            if block.inputs().len() >= STACK_REACH {
+            if !is_dup_reachable(block.inputs().len()) {
                 todo!("calling convention");
             }
 
@@ -339,14 +339,14 @@ fn plan_var(
     if should_move {
         if depth > 0 {
             bp.actions.push(Action::Swap(depth));
-            if depth > 16 {
+            if !is_swap_reachable(depth) {
                 bp.stack_log.push(x);
             }
             bp.stack.swap(depth);
         }
         bp.stack.popn(1);
     } else {
-        if depth >= 16 {
+        if !is_dup_reachable(depth) {
             bp.stack_log.push(x);
         }
         bp.actions.push(Action::Dup(depth));
@@ -472,7 +472,7 @@ fn replan_action_spilled(
             spill_stack.push(None);
         }
         Action::Swap(depth) => {
-            if depth >= STACK_REACH {
+            if !is_swap_reachable(depth) {
                 actions.extend(rswap(0, spill_stack[depth].unwrap()));
             } else {
                 actions.push(Action::Swap(depth));
@@ -483,7 +483,7 @@ fn replan_action_spilled(
             if let Some(register) = spill_stack[depth] {
                 actions.push(Action::Rload(register));
             } else {
-                assert!(depth < STACK_REACH);
+                assert!(is_dup_reachable(depth));
                 actions.push(Action::Dup(depth));
             }
             spill_stack.push(None);
@@ -507,6 +507,14 @@ fn replan_popn_spilled(
 }
 
 const STACK_REACH: usize = 16;
+
+fn is_swap_reachable(depth: usize) -> bool {
+    depth <= STACK_REACH
+}
+
+fn is_dup_reachable(depth: usize) -> bool {
+    depth < STACK_REACH
+}
 
 #[derive(Clone, Copy)]
 pub struct Spill {

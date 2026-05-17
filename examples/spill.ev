@@ -18,5 +18,6 @@ fn main() -> u256 {
     let a17 = 17;
     let a18 = 18;
     let a19 = a1;
+    let x = @add(a2, a3);
     a19
 }
