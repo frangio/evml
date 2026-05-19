@@ -409,7 +409,6 @@ fn build_cfg(proc: core::Proc, stop: bool, ids: &mut IdGen) -> ProcCfg {
 
     enum QueueItem {
         Finished(BasicBlock),
-        Discovered(BasicBlock),
         Unvisited(BasicBlockCandidate),
     }
 
@@ -449,10 +448,6 @@ fn build_cfg(proc: core::Proc, stop: bool, ids: &mut IdGen) -> ProcCfg {
     {
         match queue.pop_front().unwrap() {
             QueueItem::Finished(_) => unreachable!(),
-
-            QueueItem::Discovered(basic_block) => {
-                queue.push_back(QueueItem::Finished(basic_block));
-            }
 
             QueueItem::Unvisited(mut candidate) => {
                 let (end, join) = candidate.split_at_control(&mut segments, ids).unzip();
@@ -515,7 +510,7 @@ fn build_cfg(proc: core::Proc, stop: bool, ids: &mut IdGen) -> ProcCfg {
                         let then_label = generate_label!();
                         let else_label = generate_label!();
 
-                        queue.push_front(QueueItem::Discovered(BasicBlock {
+                        queue.push_back(QueueItem::Finished(BasicBlock {
                             label,
                             input,
                             segment,
@@ -551,7 +546,6 @@ fn build_cfg(proc: core::Proc, stop: bool, ids: &mut IdGen) -> ProcCfg {
 
     let mut labeled_blocks = HashMap::with_capacity(label_count);
 
-    // Blocks are now in postorder
     let blocks: Vec<_> = Vec::from(queue)
         .into_iter()
         .enumerate()
@@ -566,7 +560,7 @@ fn build_cfg(proc: core::Proc, stop: bool, ids: &mut IdGen) -> ProcCfg {
         })
         .collect();
 
-    let entry = CfgId::new(blocks.len() - 1);
+    let entry = CfgId::new(0);
 
     let entry_block = &blocks[entry.index()];
     assert_eq!(entry_block.segment, 0);
