@@ -1,0 +1,5 @@
+---
+source: tests/snapshots.rs
+expression: stack
+---
+- "0x33333333333333333333333333333354ccccccccccccccccccccccccccccd11f"

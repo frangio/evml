@@ -17,3 +17,6 @@ test = false
 complexity = "allow"
 new_without_default = "allow"
 unnecessary_lazy_evaluations = "allow"
+
+[dev-dependencies]
+insta = { version = "1.47.2", features = ["yaml"] }

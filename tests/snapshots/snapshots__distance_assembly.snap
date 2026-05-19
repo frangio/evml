@@ -1,0 +1,30 @@
+---
+source: tests/snapshots.rs
+expression: disasm(&bytecode)
+---
+PUSH1 3
+PUSH1 5
+PUSH2 14
+SWAP2
+SWAP1
+SWAP1
+PUSH2 16
+JUMP
+[14:] JUMPDEST
+STOP
+[16:] JUMPDEST
+DUP2
+DUP2
+GT
+PUSH2 28
+JUMPI
+SWAP1
+SUB
+SWAP1
+JUMP
+[28:] JUMPDEST
+SWAP1
+SWAP1
+SUB
+SWAP1
+JUMP
