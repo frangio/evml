@@ -241,7 +241,7 @@ fn plan_cont(
             bp.stack.popn(args.len());
         }
 
-        Cont::JumpIf { cond, then: _ } => {
+        Cont::JumpIf { cond, then: _, otherwise: _ } => {
             let should_move = should_move(cond) && !is_stack_top_pinned(&bp.stack, pinning);
             plan_var(cond, None, 0, should_move, bp);
             bp.stack.popn(1);

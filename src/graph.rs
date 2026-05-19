@@ -49,6 +49,80 @@ pub trait NodeOrdering<N> {
     fn position(&self, node: N) -> usize;
     fn node_at(&self, position: usize) -> N;
     fn iter(&self) -> impl DoubleEndedIterator<Item = N> + ExactSizeIterator;
+
+    fn len(&self) -> usize {
+        self.iter().len()
+    }
+
+    fn rev(&self) -> ReverseNodeOrder<'_, Self>
+    where
+        Self: Sized,
+    {
+        ReverseNodeOrder { inner: self }
+    }
+}
+
+pub struct ReverseNodeOrder<'a, O> {
+    inner: &'a O,
+}
+
+impl<N: Idx, O: NodeOrdering<N>> NodeOrdering<N> for ReverseNodeOrder<'_, O> {
+    fn position(&self, node: N) -> usize {
+        self.len() - 1 - self.inner.position(node)
+    }
+
+    fn node_at(&self, position: usize) -> N {
+        let len = self.len();
+        assert!(position < len);
+        self.inner.node_at(len - 1 - position)
+    }
+
+    fn iter(&self) -> impl DoubleEndedIterator<Item = N> + ExactSizeIterator {
+        self.inner.iter().rev()
+    }
+
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+}
+
+pub struct NodeOrder<N> {
+    nodes: Vec<N>,
+    positions: Vec<usize>,
+}
+
+impl<N> Default for NodeOrder<N> {
+    fn default() -> Self {
+        Self {
+            nodes: Vec::default(),
+            positions: Vec::default(),
+        }
+    }
+}
+
+impl<N: Idx> NodeOrder<N> {
+    pub fn new(nodes: Box<[N]>, node_count: usize) -> Self {
+        let nodes = Vec::from(nodes);
+        let mut positions = vec![0; node_count];
+        for (pos, &node) in nodes.iter().enumerate() {
+            positions[node.index()] = pos;
+        }
+        Self { nodes, positions }
+    }
+}
+
+impl<N: Idx> NodeOrdering<N> for NodeOrder<N> {
+    fn position(&self, node: N) -> usize {
+        self.positions[node.index()]
+    }
+
+    fn node_at(&self, position: usize) -> N {
+        self.nodes[position]
+    }
+
+    fn iter(&self) -> impl DoubleEndedIterator<Item = N> + ExactSizeIterator + use<'_, N> {
+        self.nodes.iter().copied()
+    }
 }
 
 impl<G: Graph + ?Sized> Graph for &G {
@@ -423,34 +497,8 @@ pub mod tests {
             }
         }
 
-        pub fn postorder(&self) -> impl NodeOrdering<usize> {
-            struct Postorder<N> {
-                nodes: Box<[N]>,
-                positions: Box<[usize]>,
-            }
-
-            impl<N: Idx> NodeOrdering<N> for Postorder<N> {
-                fn position(&self, node: N) -> usize {
-                    self.positions[node.index()]
-                }
-
-                fn node_at(&self, position: usize) -> N {
-                    self.nodes[position]
-                }
-
-                fn iter(&self) -> impl DoubleEndedIterator<Item = N> + ExactSizeIterator {
-                    self.nodes.iter().copied()
-                }
-            }
-
-            let nodes = postorder(self);
-
-            let mut positions = vec![0; self.node_count()].into_boxed_slice();
-            for (pos, &node) in nodes.iter().enumerate() {
-                positions[node.index()] = pos;
-            }
-
-            Postorder { nodes, positions }
+        pub fn postorder(&self) -> NodeOrder<usize> {
+            NodeOrder::new(postorder(self), self.node_count())
         }
     }
 

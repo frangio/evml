@@ -9,7 +9,10 @@ use crate::utils::exact_size_chain;
 use crate::{asm, core};
 use crate::id::{Id, IdGen};
 use crate::analysis::{self, Cfg, DefUse, Procedure, liveness};
-use crate::graph::{EdgeArray, EntryNode, Graph, Idx, NodeOrdering, Predecessors, Successors, Tree, idom, predecessor_edges};
+use crate::graph::{
+    self, EdgeArray, EntryNode, Graph, Idx, NodeOrder, NodeOrdering, Predecessors, Successors,
+    Tree, idom, predecessor_edges,
+};
 use crate::opcodes;
 use crate::U256;
 
@@ -45,29 +48,40 @@ fn compile_proc(
 ) {
     let proc = build_cfg(proc, stop, ids);
     let block_plans = plan::plan_proc(&proc);
+    let emission_order = proc.postorder().rev();
+    let mut prev_used_fallthrough = false;
 
-    for block_id in proc.blocks_rpo() {
-        emit_block(
-            proc.block(block_id),
+    for (i, block_id) in emission_order.iter().enumerate() {
+        let block = proc.block(block_id);
+
+        if let Some(label) = block.data().label
+            && !(prev_used_fallthrough && proc.predecessors(block_id).len() == 1)
+        {
+            code.push(asm::Instr::JumpDest(label));
+        }
+
+        let fallthrough_label = (i + 1 < proc.node_count())
+            .then(|| proc.label(emission_order.node_at(i + 1)))
+            .flatten();
+
+        prev_used_fallthrough = emit_block(
+            block,
             &block_plans[block_id.index()],
-            proc.fallthrough(block_id).and_then(|i| proc.label(i)),
+            fallthrough_label,
             ids,
             code,
         );
     }
 }
 
+/// Returns whether the block fell through to the next emitted block.
 fn emit_block(
     block: BasicBlockRef,
     block_plan: &plan::BlockPlan,
     fallthrough_label: Option<Id>,
     ids: &mut IdGen,
     code: &mut Vec<asm::Instr>,
-) {
-    if let Some(label) = block.data().label {
-        code.push(asm::Instr::JumpDest(label));
-    }
-
+) -> bool {
     for ((_, expr), actions) in zip(block.priors(), block_plan.prior_actions()) {
         let ret = emit_actions(actions, ids, code);
         emit_expr(expr, code);
@@ -76,7 +90,7 @@ fn emit_block(
         }
     }
     emit_actions(block_plan.cont_actions(), ids, code);
-    emit_cont(&block.data().cont, fallthrough_label, code);
+    emit_cont(&block.data().cont, fallthrough_label, code)
 }
 
 fn emit_actions(
@@ -138,11 +152,12 @@ fn emit_expr(expr: &core::Expr, code: &mut Vec<asm::Instr>) {
     }
 }
 
+/// Returns whether the continuation fell through to the next emitted block.
 fn emit_cont(
     cont: &Cont,
     fallthrough_label: Option<Id>,
     code: &mut Vec<asm::Instr>,
-) {
+) -> bool {
     use asm::*;
     match *cont {
         Cont::Ret { target_var, .. } => {
@@ -151,18 +166,29 @@ fn emit_cont(
             } else {
                 code.push(Instr::Stop);
             }
+            false
         }
 
         Cont::Jump(target, _) => {
             if Some(target) != fallthrough_label {
                 code.push(Instr::PushLabel(target));
                 code.push(Instr::Jump);
+                false
+            } else {
+                true
             }
         }
 
-        Cont::JumpIf { then, .. } => {
+        Cont::JumpIf { then, otherwise, .. } => {
             code.push(Instr::PushLabel(then));
             code.push(Instr::JumpIf);
+            if Some(otherwise) != fallthrough_label {
+                code.push(Instr::PushLabel(otherwise));
+                code.push(Instr::Jump);
+                false
+            } else {
+                true
+            }
         }
     }
 }
@@ -172,9 +198,9 @@ pub type BlockPinning = analysis::Pinning<Id>;
 
 pub fn analyze(proc: &ProcCfg) -> ProcAnalysis {
     let postorder = proc.postorder();
-    let liveness = liveness(proc, &postorder);
-    let dom_tree = Tree::new(proc.entry(), idom(proc, &postorder));
-    let pinning = analysis::pinning(proc, &postorder, &dom_tree, &liveness);
+    let liveness = liveness(proc, postorder);
+    let dom_tree = Tree::new(proc.entry(), idom(proc, postorder));
+    let pinning = analysis::pinning(proc, postorder, &dom_tree, &liveness);
     ProcAnalysis { liveness, pinning, dom_tree }
 }
 
@@ -214,10 +240,12 @@ impl Idx for CfgId {
 pub struct ProcCfg {
     args: Box<[Id]>,
     ret_target_var: Option<Id>,
+    entry: CfgId,
     blocks: Box<[BasicBlock]>,
     segments: Box<[Box<[(Option<Id>, core::Expr)]>]>,
     labeled_blocks: HashMap<Id, usize>,
     preds: EdgeArray<CfgId>,
+    postorder: NodeOrder<CfgId>,
 }
 
 #[derive(PartialEq, Eq, Debug)]
@@ -234,7 +262,7 @@ struct BasicBlock {
 enum Cont {
     Ret { target_var: Option<Id>, value: Option<Id> },
     Jump(Id, Box<[Id]>),
-    JumpIf { cond: Id, then: Id },
+    JumpIf { cond: Id, then: Id, otherwise: Id },
 }
 
 impl ProcCfg {
@@ -253,10 +281,6 @@ impl ProcCfg {
         self.blocks[block_id.index()].label
     }
 
-    fn fallthrough(&self, block_id: CfgId) -> Option<CfgId> {
-        block_id.index().checked_sub(1).map(CfgId::new)
-    }
-
     fn successor_blocks(&self, block_id: CfgId) -> impl ExactSizeIterator<Item = CfgId> {
         let (target, fallthrough) = match &self.block(block_id).data().cont {
             Cont::Ret { .. } => (None, None),
@@ -265,22 +289,16 @@ impl ProcCfg {
                 self.labeled_blocks.get(target).map(|&i| CfgId::new(i)),
                 None,
             ),
-            Cont::JumpIf { then, .. } => (
+            Cont::JumpIf { then, otherwise, .. } => (
+                Some(CfgId::new(self.labeled_blocks[otherwise])),
                 Some(CfgId::new(self.labeled_blocks[then])),
-                Some(self.fallthrough(block_id).unwrap()),
             ),
         };
         exact_size_chain(target, fallthrough)
     }
 
-    fn postorder(&self) -> IndexedProcPostorder {
-        IndexedProcPostorder {
-            block_count: self.blocks.len(),
-        }
-    }
-
-    fn blocks_rpo(&self) -> impl Iterator<Item = CfgId> {
-        self.postorder().iter().rev()
+    fn postorder(&self) -> &NodeOrder<CfgId> {
+        &self.postorder
     }
 }
 
@@ -305,28 +323,6 @@ impl<'a> BasicBlockRef<'a> {
     fn priors(&self) -> &'a [(Option<Id>, core::Expr)] {
         let data = self.data();
         &self.proc.segments[data.segment][data.start..data.end]
-    }
-}
-
-pub struct IndexedProcPostorder {
-    block_count: usize,
-}
-
-impl NodeOrdering<CfgId> for IndexedProcPostorder {
-    fn position(&self, node: CfgId) -> usize {
-        let index = node.index();
-        assert!(index < self.block_count);
-        index
-    }
-
-    fn node_at(&self, position: usize) -> CfgId {
-        assert!(position < self.block_count);
-        CfgId::new(position)
-    }
-
-    #[allow(refining_impl_trait)]
-    fn iter(&self) -> impl DoubleEndedIterator<Item = CfgId> + ExactSizeIterator + use<> {
-        (0..self.block_count).map(CfgId::new)
     }
 }
 
@@ -517,6 +513,7 @@ fn build_cfg(proc: core::Proc, stop: bool, ids: &mut IdGen) -> ProcCfg {
                     TailExpr::IfThenElse(cond, then_else) => {
                         let [then_block, else_block] = *then_else;
                         let then_label = generate_label!();
+                        let else_label = generate_label!();
 
                         queue.push_front(QueueItem::Discovered(BasicBlock {
                             label,
@@ -527,10 +524,12 @@ fn build_cfg(proc: core::Proc, stop: bool, ids: &mut IdGen) -> ProcCfg {
                             cont: Cont::JumpIf {
                                 cond,
                                 then: then_label,
+                                otherwise: else_label,
                             },
                         }));
 
                         queue.push_front(QueueItem::Unvisited(BasicBlockCandidate {
+                            label: Some(else_label),
                             cont_label,
                             ..build_candidate!(else_block)
                         }));
@@ -567,15 +566,24 @@ fn build_cfg(proc: core::Proc, stop: bool, ids: &mut IdGen) -> ProcCfg {
         })
         .collect();
 
+    let entry = CfgId::new(blocks.len() - 1);
+
+    let entry_block = &blocks[entry.index()];
+    assert_eq!(entry_block.segment, 0);
+    assert_eq!(entry_block.start, 0);
+
     let mut cfg = ProcCfg {
         args,
         ret_target_var,
+        entry,
         segments: segments.into_boxed_slice(),
         preds: EdgeArray::default(),
+        postorder: NodeOrder::default(),
         blocks: blocks.into_boxed_slice(),
         labeled_blocks,
     };
     cfg.preds = predecessor_edges(&cfg);
+    cfg.postorder = NodeOrder::new(graph::postorder(&cfg), cfg.blocks.len());
     cfg
 }
 
@@ -593,7 +601,7 @@ impl Graph for ProcCfg {
 
 impl EntryNode for ProcCfg {
     fn entry(&self) -> CfgId {
-        CfgId::new(self.blocks.len() - 1)
+        self.entry
     }
 }
 
@@ -910,7 +918,7 @@ mod tests {
             ),
         };
         let code = compile(program(block, 1), &mut ids.clone());
-        generate_ids! { label1, label2 in ids };
+        generate_ids! { label1, _outer_else, label2 in ids };
         assert_eq!(
             code,
             vec![
