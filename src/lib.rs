@@ -72,7 +72,7 @@ pub mod core {
         Var(Id),
         Op(u8, Box<[Id]>),
         Apply(Id, Box<[Id]>),
-        Join(Option<Id>, usize, Box<Block>),
+        Join(Box<[Id]>, usize, Box<Block>),
         IfThenElse(Id, Box<[Block; 2]>),
     }
 
@@ -81,7 +81,7 @@ pub mod core {
         Unit,
         Var(Id),
         Apply(Id, Box<[Id]>),
-        Jump(Id, Option<Id>),
+        Jump(Id, Box<[Id]>),
         IfThenElse(Id, Box<[Block; 2]>),
     }
 
@@ -312,6 +312,23 @@ mod tests {
                     if x { f(@sub(x, 1)) } else { x }
                 }
                 f(3)
+            }
+        "#);
+    }
+
+    #[test]
+    fn test_e2e_multi_arg_local_func() {
+        assert_e2e_result(U256::from(120), r#"
+            fn main() -> u256 {
+                fn fact(n, acc) -> u256 {
+                    if n {
+                        fact(@sub(n, 1), @mul(acc, n))
+                    } else {
+                        acc
+                    }
+                }
+
+                fact(5, 1)
             }
         "#);
     }

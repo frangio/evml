@@ -270,7 +270,7 @@ pub struct ProcCfg {
 #[derive(PartialEq, Eq, Debug)]
 struct BasicBlock {
     label: Option<Id>,
-    input: Option<Id>,
+    input: Box<[Id]>,
     segment: usize,
     start: usize,
     end: usize,
@@ -279,7 +279,7 @@ struct BasicBlock {
 
 #[derive(PartialEq, Eq, Debug)]
 enum Exit {
-    Cont(Cont, Option<Id>),
+    Cont(Cont, Box<[Id]>),
     Apply(Id, Box<[Id]>, Cont),
     Branch { cond: Id, then: Id, otherwise: Id },
 }
@@ -344,7 +344,7 @@ impl<'a> BasicBlockRef<'a> {
         if self.id == self.proc.entry() {
             self.proc.args.as_ref()
         } else {
-            self.data().input.as_slice()
+            self.data().input.as_ref()
         }
     }
 
@@ -356,7 +356,7 @@ impl<'a> BasicBlockRef<'a> {
 
 struct BasicBlockCandidate {
     label: Option<Id>,
-    input: Option<Id>,
+    input: Box<[Id]>,
     segment: usize,
     start: usize,
     tail: core::TailExpr,
@@ -394,10 +394,10 @@ impl BasicBlockCandidate {
             split,
             BasicBlockCandidate {
                 label: Some(join_label),
-                input: split_output,
                 segment: self.segment,
                 start: split + 1,
                 tail,
+                input: split_output.into_iter().collect(),
                 cont,
             },
         ))
@@ -438,7 +438,7 @@ fn build_cfg(proc: core::Proc, stop: bool, ids: &mut IdGen) -> ProcCfg {
                 tail,
                 start: 0,
                 label: None,
-                input: None,
+                input: Box::new([]),
                 cont: $cont,
             }
         }};
@@ -474,10 +474,10 @@ fn build_cfg(proc: core::Proc, stop: bool, ids: &mut IdGen) -> ProcCfg {
                     TailExpr::Unit | TailExpr::Var(_) | TailExpr::Apply(_, _) | TailExpr::Jump(_, _) => {
                         let exit = match tail {
                             TailExpr::Unit | TailExpr::Var(_) => {
-                                let res = if let TailExpr::Var(x) = tail {
-                                    Some(x)
+                                let res: Box<[Id]> = if let TailExpr::Var(x) = tail {
+                                    Box::new([x])
                                 } else {
-                                    None
+                                    Box::new([])
                                 };
                                 Exit::Cont(cont, res)
                             }
@@ -543,7 +543,7 @@ fn build_cfg(proc: core::Proc, stop: bool, ids: &mut IdGen) -> ProcCfg {
                         let Expr::Join(input, _, body) = replace(join, Expr::Unit) else { unreachable!() };
                         queue.push_front(QueueItem::Unvisited(BasicBlockCandidate {
                             label: Some(label),
-                            input,
+                            input: input.into(),
                             ..build_candidate!(*body, cont)
                         }));
                     }
@@ -664,7 +664,7 @@ impl Procedure for ProcCfg {
         });
 
         let exit_args: &[Id] = match &block.data().exit {
-            Exit::Cont(_, value) => value.as_slice(),
+            Exit::Cont(_, value) => value.as_ref(),
             Exit::Apply(_, args, _) => args.as_ref(),
             Exit::Branch { cond, .. } => slice::from_ref(cond),
         };

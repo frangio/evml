@@ -240,9 +240,10 @@ fn plan_exit(
     match exit {
         Exit::Cont(Cont::Ret, value) => {
             let target_var = ret_target_var.unwrap();
-            assert_eq!(bp.stack.len(), 1 + value.iter().len());
-            if let Some(value) = value {
-                assert_eq!(bp.stack.read(0), Some(*value));
+            if value.len() > 1 { todo!("multi-value return"); }
+            assert_eq!(bp.stack.len(), 1 + value.len());
+            if let &[value] = value.as_ref() {
+                assert_eq!(bp.stack.read(0), Some(value));
                 bp.actions.push(Action::Swap(1));
                 bp.stack.swap(1);
             }
@@ -251,15 +252,16 @@ fn plan_exit(
         }
 
         Exit::Cont(Cont::Stop, value) => {
-            assert_eq!(bp.stack.len(), value.iter().len());
-            if let Some(value) = value {
-                assert_eq!(bp.stack.read(0), Some(*value));
+            if value.len() > 1 { todo!("multi-value stop"); }
+            assert_eq!(bp.stack.len(), value.len());
+            if let &[value] = value.as_ref() {
+                assert_eq!(bp.stack.read(0), Some(value));
             }
         }
 
-        Exit::Cont(Cont::Jump(_), arg) => {
-            plan_args(arg.as_slice(), None, should_move, pinning, bp);
-            bp.stack.popn(arg.iter().len());
+        Exit::Cont(Cont::Jump(_), args) => {
+            plan_args(args, None, should_move, pinning, bp);
+            bp.stack.popn(args.len());
         }
 
         Exit::Apply(_, args, cont) => {
@@ -452,7 +454,7 @@ fn replan_block_spilled(
     let pop_count = match &block.data().exit {
         Exit::Cont(Cont::Ret, _) => block.proc.ret_target_var().iter().len(),
         Exit::Cont(Cont::Stop, _) => 0,
-        Exit::Cont(Cont::Jump(_), value) => value.iter().len(),
+        Exit::Cont(Cont::Jump(_), value) => value.len(),
         Exit::Apply(_, args, _) => args.len() + 1,
         Exit::Branch { .. } => 1,
     };

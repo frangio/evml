@@ -42,7 +42,6 @@ fn type_check_block(block: &ast::Block<Id>, mut env: HashMap<Id, Type>, tail_dep
                 }
             }
             ast::Stmt::Func(name, f) => {
-                ensure!(f.args.len() <= 1, "function has too many arguments");
                 env.insert(*name, Type::Join { args: f.args.len(), rets: f.rets, depth: tail_depth });
                 type_check_func(f, &env)?;
             }
@@ -224,12 +223,12 @@ mod tests {
     }
 
     #[test]
-    fn test_type_check_func_rejects_multiple_args() {
+    fn test_type_check_func_multiple_args() {
         let mut ids = IdGen::new();
         let ast = crate::parse("fn main() -> u256 { fn f(x, y) -> u256 { @add(x, y) } f(0, 0) }")
             .unwrap();
         let ast = crate::resolve(&ast, &mut ids).unwrap();
-        assert!(type_check(&ast).is_err());
+        assert!(type_check(&ast).is_ok());
     }
 
     #[test]

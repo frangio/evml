@@ -28,11 +28,9 @@ fn lower_block(block: ast::Block<Id>, ids: &mut IdGen, joins: &mut HashSet<Id>) 
             }
 
             ast::Stmt::Func(name, ast::Func { args, rets, body }) => {
-                if args.len() > 1 { todo!() }
-                let arg = args.first().copied();
                 joins.insert(name);
                 let body = lower_block(body, ids, joins);
-                let expr = core::Expr::Join(arg, rets, Box::new(body));
+                let expr = core::Expr::Join(args, rets, Box::new(body));
                 priors.push((Some(name), expr));
             }
         }
@@ -121,8 +119,7 @@ fn expr_to_tail(
 
         core::Expr::Apply(f, args) => {
             if joins.contains(&f) {
-                assert!(args.len() <= 1);
-                core::TailExpr::Jump(f, args.first().copied())
+                core::TailExpr::Jump(f, args)
             } else {
                 core::TailExpr::Apply(f, args)
             }
@@ -148,8 +145,11 @@ mod tests {
         let ast = resolve(&ast, &mut ids).unwrap();
         let ir = lower(ast, &mut ids);
 
-        let (Some(f), core::Expr::Join(Some(x), rets, body)) = &ir.main.priors[0] else {
+        let (Some(f), core::Expr::Join(args, rets, body)) = &ir.main.priors[0] else {
             panic!("expected lowered join");
+        };
+        let [x] = args.as_ref() else {
+            panic!("expected one join argument");
         };
         assert_eq!(rets, &1);
         assert!(matches!(body.tail, core::TailExpr::Var(_)));

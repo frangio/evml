@@ -1,0 +1,11 @@
+fn main() -> u256 {
+  fn fact(n, acc) -> u256 {
+    if n {
+      fact(@sub(n, 1), @mul(acc, n))
+    } else {
+      acc
+    }
+  }
+
+  fact(5, 1)
+}
