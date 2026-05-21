@@ -3,38 +3,47 @@ use anyhow::{bail, Result, Context};
 use crate::{ast::*, id::{Id, IdGen}};
 
 pub fn resolve(program: &Program<&str>, ids: &mut IdGen) -> Result<Program<Id>> {
-    let mut prog_env = HashMap::with_capacity(program.procs.len());
+    let mut prog_env = HashMap::with_capacity(program.funcs.len());
 
-    for &(name, _) in &program.procs {
+    for &(name, _) in &program.funcs {
         let id = ids.generate();
         if prog_env.insert(name, id).is_some() {
             bail!("duplicate procedure {name}");
         }
     }
 
-    let mut procs = Vec::with_capacity(program.procs.len());
+    let mut funcs = Vec::with_capacity(program.funcs.len());
 
-    for (name, proc) in &program.procs {
+    for (name, f) in &program.funcs {
         let id = prog_env[name];
-        let proc = resolve_proc(proc, ids, &prog_env)?;
-        procs.push((id, proc));
+        let f = resolve_func(f, ids, &prog_env)?;
+        funcs.push((id, f));
     }
 
-    Ok(Program { procs })
+    Ok(Program { funcs })
 }
 
-fn resolve_proc(proc: &Proc<&str>, ids: &mut IdGen, prog_env: &HashMap<&str, Id>) -> Result<Proc<Id>> {
+fn resolve_func(f: &Func<&str>, ids: &mut IdGen, prog_env: &HashMap<&str, Id>) -> Result<Func<Id>> {
     let mut env = prog_env.clone();
-    env.reserve(proc.args.len());
-    let args = proc.args.iter().map(|_| ids.generate()).collect::<Box<[_]>>();
-    let first = args.first().copied();
-    for (&arg, &id) in zip(&proc.args, &args) {
+    env.reserve(f.args.len());
+    let args = resolve_args(&f.args, ids, &mut env)?;
+    let body = resolve_block(&f.body, ids, env)?;
+    Ok(Func { args, rets: f.rets, body })
+}
+
+fn resolve_args<'a>(
+    args: &[&'a str],
+    ids: &mut IdGen,
+    env: &mut HashMap<&'a str, Id>,
+) -> Result<Box<[Id]>> {
+    let resolved_args = args.iter().map(|_| ids.generate()).collect::<Box<[_]>>();
+    let first = resolved_args.first().copied();
+    for (&arg, &id) in zip(args, &resolved_args) {
         if env.insert(arg, id) >= first {
             bail!("duplicate argument {arg}");
         }
     }
-    let body = resolve_block(&proc.body, ids, env)?;
-    Ok(Proc { args, rets: proc.rets, body })
+    Ok(resolved_args)
 }
 
 fn resolve_block<'a>(
@@ -42,21 +51,30 @@ fn resolve_block<'a>(
     ids: &mut IdGen,
     mut env: HashMap<&'a str, Id>,
 ) -> Result<Block<Id>> {
-    let mut priors = Vec::with_capacity(block.priors.len());
+    let mut stmts = Vec::with_capacity(block.stmts.len());
 
-    for (x, expr) in &block.priors {
-        let expr = resolve_expr(expr, ids, &env)?;
-        let y = x.as_ref().map(|x| {
-            let y = ids.generate();
-            env.insert(x, y);
-            y
-        });
-        priors.push((y, expr));
+    for stmt in &block.stmts {
+        match stmt {
+            Stmt::Let(x, expr) => {
+                let expr = resolve_expr(expr, ids, &env)?;
+                let x = x.map(|x| {
+                    let y = ids.generate();
+                    env.insert(x, y);
+                    y
+                });
+                stmts.push(Stmt::Let(x, expr));
+            }
+            Stmt::Func(name, f) => {
+                let y = ids.generate();
+                env.insert(name, y);
+                stmts.push(Stmt::Func(y, resolve_func(f, ids, &env)?));
+            }
+        }
     }
 
     let tail = resolve_expr(&block.tail, ids, &env)?;
 
-    Ok(Block { priors, tail })
+    Ok(Block { stmts, tail })
 }
 
 fn resolve_expr(

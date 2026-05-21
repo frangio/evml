@@ -4,7 +4,7 @@ use std::mem::{replace, take};
 use std::num::NonZero;
 use std::slice;
 
-use crate::compile::plan::Action;
+use crate::compile::plan::{Action, RetLabel};
 use crate::utils::exact_size_chain;
 use crate::{asm, core};
 use crate::id::{Id, IdGen};
@@ -89,8 +89,16 @@ fn emit_block(
             code.push(asm::Instr::JumpDest(ret));
         }
     }
-    emit_actions(block_plan.cont_actions(), ids, code);
-    emit_cont(&block.data().cont, fallthrough_label, code)
+    let ret = emit_actions(block_plan.exit_actions(), ids, code);
+    let fell_through = emit_exit(&block.data().exit, fallthrough_label, code);
+    if let Some(ret) = ret {
+        assert!(!fell_through);
+        code.push(asm::Instr::JumpDest(ret));
+        code.push(asm::Instr::Stop);
+        false
+    } else {
+        fell_through
+    }
 }
 
 fn emit_actions(
@@ -106,9 +114,12 @@ fn emit_actions(
             Action::Pop => {
                 code.push(Instr::Pop);
             }
-            Action::PushLabel => {
+            Action::PushLabel(RetLabel::Fresh) => {
                 let ret = *ret.get_or_insert_with(|| ids.generate());
                 code.push(Instr::PushLabel(ret));
+            }
+            Action::PushLabel(RetLabel::Known(label)) => {
+                code.push(Instr::PushLabel(label));
             }
             Action::Rload(register) => {
                 code.push(Instr::Push(U256::from(register * 32)));
@@ -148,38 +159,46 @@ fn emit_expr(expr: &core::Expr, code: &mut Vec<asm::Instr>) {
             code.push(Instr::Jump);
         }
 
-        Expr::Unit | Expr::IfThenElse(..) => panic!(),
+        Expr::Unit => {}
+
+        Expr::Join(..) | Expr::IfThenElse(..) => panic!(),
     }
 }
 
-/// Returns whether the continuation fell through to the next emitted block.
-fn emit_cont(
-    cont: &Cont,
+/// Returns whether the block exit fell through to the next emitted block.
+fn emit_exit(
+    exit: &Exit,
     fallthrough_label: Option<Id>,
     code: &mut Vec<asm::Instr>,
 ) -> bool {
     use asm::*;
-    match *cont {
-        Cont::Ret { target_var, .. } => {
-            if target_var.is_some() {
-                code.push(Instr::Jump);
-            } else {
-                code.push(Instr::Stop);
-            }
+    match *exit {
+        Exit::Cont(Cont::Ret, _) => {
+            code.push(Instr::Jump);
             false
         }
 
-        Cont::Jump(target, _) => {
-            if Some(target) != fallthrough_label {
-                code.push(Instr::PushLabel(target));
-                code.push(Instr::Jump);
-                false
-            } else {
-                true
-            }
+        Exit::Cont(Cont::Stop, _) => {
+            code.push(Instr::Stop);
+            false
         }
 
-        Cont::JumpIf { then, otherwise, .. } => {
+        Exit::Cont(Cont::Jump(target), _) => {
+            let fallthrough = Some(target) == fallthrough_label;
+            if !fallthrough {
+                code.push(Instr::PushLabel(target));
+                code.push(Instr::Jump);
+            }
+            fallthrough
+        }
+
+        Exit::Apply(target, _, _) => {
+            code.push(Instr::PushLabel(target));
+            code.push(Instr::Jump);
+            false
+        }
+
+        Exit::Branch { then, otherwise, .. } => {
             code.push(Instr::PushLabel(then));
             code.push(Instr::JumpIf);
             if Some(otherwise) != fallthrough_label {
@@ -255,14 +274,21 @@ struct BasicBlock {
     segment: usize,
     start: usize,
     end: usize,
-    cont: Cont,
+    exit: Exit,
 }
 
 #[derive(PartialEq, Eq, Debug)]
+enum Exit {
+    Cont(Cont, Option<Id>),
+    Apply(Id, Box<[Id]>, Cont),
+    Branch { cond: Id, then: Id, otherwise: Id },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Cont {
-    Ret { target_var: Option<Id>, value: Option<Id> },
-    Jump(Id, Box<[Id]>),
-    JumpIf { cond: Id, then: Id, otherwise: Id },
+    Ret,
+    Stop,
+    Jump(Id),
 }
 
 impl ProcCfg {
@@ -282,14 +308,16 @@ impl ProcCfg {
     }
 
     fn successor_blocks(&self, block_id: CfgId) -> impl ExactSizeIterator<Item = CfgId> {
-        let (target, fallthrough) = match &self.block(block_id).data().cont {
-            Cont::Ret { .. } => (None, None),
-            Cont::Jump(target, _) => (
-                // Target may be another procedure if this is a tail call
-                self.labeled_blocks.get(target).map(|&i| CfgId::new(i)),
-                None,
-            ),
-            Cont::JumpIf { then, otherwise, .. } => (
+        let (target, fallthrough) = match &self.block(block_id).data().exit {
+            Exit::Cont(cont, _) | Exit::Apply(_, _, cont) => {
+                let target = match cont {
+                    Cont::Ret | Cont::Stop => None,
+                    Cont::Jump(target) => Some(CfgId::new(self.labeled_blocks[target])),
+                };
+                (target, None)
+            }
+
+            Exit::Branch { then, otherwise, .. } => (
                 Some(CfgId::new(self.labeled_blocks[otherwise])),
                 Some(CfgId::new(self.labeled_blocks[then])),
             ),
@@ -326,38 +354,13 @@ impl<'a> BasicBlockRef<'a> {
     }
 }
 
-fn normalize_tail(
-    block: core::Block,
-    stop: Option<usize>,
-    ids: &mut IdGen,
-) -> (Vec<(Option<Id>, core::Expr)>, core::TailExpr) {
-    use core::{Block, Expr, TailExpr};
-
-    let Block {
-        mut priors,
-        mut tail,
-    } = block;
-    if let Some(rets) = stop && let TailExpr::Apply(target, args) = tail {
-        assert!(rets <= 1);
-        if rets == 0 {
-            priors.push((None, Expr::Apply(target, args)));
-            tail = TailExpr::Unit;
-        } else {
-            let res = ids.generate();
-            priors.push((Some(res), Expr::Apply(target, args)));
-            tail = TailExpr::Var(res);
-        }
-    }
-    (priors, tail)
-}
-
 struct BasicBlockCandidate {
     label: Option<Id>,
     input: Option<Id>,
     segment: usize,
     start: usize,
     tail: core::TailExpr,
-    cont_label: Option<Id>,
+    cont: Cont,
 }
 
 impl BasicBlockCandidate {
@@ -380,22 +383,22 @@ impl BasicBlockCandidate {
             unreachable!()
         };
 
-        let cont_label = self.cont_label;
+        let cont = self.cont;
 
-        let join_label = Some(ids.generate());
-        self.cont_label = join_label;
+        let join_label = ids.generate();
+        self.cont = Cont::Jump(join_label);
 
         let tail = replace(&mut self.tail, TailExpr::IfThenElse(cond, then_else));
 
         Some((
             split,
             BasicBlockCandidate {
-                label: join_label,
+                label: Some(join_label),
                 input: split_output,
                 segment: self.segment,
                 start: split + 1,
                 tail,
-                cont_label,
+                cont,
             },
         ))
     }
@@ -404,8 +407,9 @@ impl BasicBlockCandidate {
 fn build_cfg(proc: core::Proc, stop: bool, ids: &mut IdGen) -> ProcCfg {
     use core::*;
 
-    let Proc { args, body, rets } = proc;
+    let Proc { args, body, rets: _ } = proc;
     let ret_target_var = (!stop).then(|| ids.generate());
+    let root_cont = if stop { Cont::Stop } else { Cont::Ret };
 
     enum QueueItem {
         Finished(BasicBlock),
@@ -425,8 +429,8 @@ fn build_cfg(proc: core::Proc, stop: bool, ids: &mut IdGen) -> ProcCfg {
     let mut queue = VecDeque::new();
 
     macro_rules! build_candidate {
-        ($block:expr) => {{
-            let (priors, tail) = normalize_tail($block, stop.then_some(rets), ids);
+        ($block:expr, $cont:expr) => {{
+            let core::Block { priors, tail } = $block;
             let segment = segments.len();
             segments.push(priors.into_boxed_slice());
             BasicBlockCandidate {
@@ -435,12 +439,12 @@ fn build_cfg(proc: core::Proc, stop: bool, ids: &mut IdGen) -> ProcCfg {
                 start: 0,
                 label: None,
                 input: None,
-                cont_label: None,
+                cont: $cont,
             }
         }};
     }
 
-    queue.push_front(QueueItem::Unvisited(build_candidate!(body)));
+    queue.push_front(QueueItem::Unvisited(build_candidate!(body, root_cont)));
 
     while queue
         .front()
@@ -453,10 +457,7 @@ fn build_cfg(proc: core::Proc, stop: bool, ids: &mut IdGen) -> ProcCfg {
                 let (end, join) = candidate.split_at_control(&mut segments, ids).unzip();
 
                 let end = end.unwrap_or_else(|| segments[candidate.segment].len());
-
-                if let Some(join) = &join
-                    && join.label.is_some()
-                {
+                if let Some(join) = &join && join.label.is_some() {
                     label_count += 1;
                 }
 
@@ -466,31 +467,27 @@ fn build_cfg(proc: core::Proc, stop: bool, ids: &mut IdGen) -> ProcCfg {
                     segment,
                     start,
                     tail,
-                    cont_label,
+                    cont,
                 } = candidate;
 
                 match tail {
-                    TailExpr::Unit | TailExpr::Var(_) | TailExpr::Apply(_, _) => {
-                        let cont = match tail {
+                    TailExpr::Unit | TailExpr::Var(_) | TailExpr::Apply(_, _) | TailExpr::Jump(_, _) => {
+                        let exit = match tail {
                             TailExpr::Unit | TailExpr::Var(_) => {
                                 let res = if let TailExpr::Var(x) = tail {
                                     Some(x)
                                 } else {
                                     None
                                 };
-                                cont_label.map_or(
-                                    if stop {
-                                        Cont::Ret { target_var: None, value: res }
-                                    } else {
-                                        Cont::Ret { target_var: ret_target_var, value: res }
-                                    },
-                                    |cont| Cont::Jump(cont, res.into_iter().collect()),
-                                )
+                                Exit::Cont(cont, res)
                             }
 
                             TailExpr::Apply(target, args) => {
-                                assert!(cont_label.is_none());
-                                Cont::Jump(target, args)
+                                Exit::Apply(target, args, cont)
+                            }
+
+                            TailExpr::Jump(target, arg) => {
+                                Exit::Cont(Cont::Jump(target), arg)
                             }
 
                             TailExpr::IfThenElse(..) => unreachable!(),
@@ -501,7 +498,7 @@ fn build_cfg(proc: core::Proc, stop: bool, ids: &mut IdGen) -> ProcCfg {
                             segment,
                             start,
                             end,
-                            cont,
+                            exit,
                         }))
                     }
 
@@ -516,7 +513,7 @@ fn build_cfg(proc: core::Proc, stop: bool, ids: &mut IdGen) -> ProcCfg {
                             segment,
                             start,
                             end,
-                            cont: Cont::JumpIf {
+                            exit: Exit::Branch {
                                 cond,
                                 then: then_label,
                                 otherwise: else_label,
@@ -525,20 +522,31 @@ fn build_cfg(proc: core::Proc, stop: bool, ids: &mut IdGen) -> ProcCfg {
 
                         queue.push_front(QueueItem::Unvisited(BasicBlockCandidate {
                             label: Some(else_label),
-                            cont_label,
-                            ..build_candidate!(else_block)
+                            ..build_candidate!(else_block, cont)
                         }));
 
                         queue.push_front(QueueItem::Unvisited(BasicBlockCandidate {
                             label: Some(then_label),
-                            cont_label,
-                            ..build_candidate!(then_block)
+                            ..build_candidate!(then_block, cont)
                         }));
                     }
                 }
 
                 if let Some(join) = join {
                     queue.push_front(QueueItem::Unvisited(join));
+                }
+
+                for index in (start..end).rev() {
+                    if let (label, join @ Expr::Join(_, _, _)) = &mut segments[segment][index] {
+                        let label = label.take().unwrap();
+                        label_count += 1;
+                        let Expr::Join(input, _, body) = replace(join, Expr::Unit) else { unreachable!() };
+                        queue.push_front(QueueItem::Unvisited(BasicBlockCandidate {
+                            label: Some(label),
+                            input,
+                            ..build_candidate!(*body, cont)
+                        }));
+                    }
                 }
             }
         }
@@ -615,7 +623,7 @@ impl Predecessors for ProcCfg {
 pub enum InstrIdx {
     Input,
     Prior(usize),
-    Cont,
+    Exit,
 }
 
 impl Procedure for ProcCfg {
@@ -649,23 +657,29 @@ impl Procedure for ProcCfg {
                 Expr::Op(_, args) => args,
                 Expr::Apply(_, args) => args,
                 Expr::IfThenElse(id, _) => slice::from_ref(id),
+                Expr::Join(_, _, _) => panic!("join unexpected within basic block"),
             };
             let uses_iter = ids.iter().map(move |&id| (InstrIdx::Prior(i), id, DefUse::Use));
             chain(def_iter, uses_iter)
         });
 
-        let (cont_args, cont_target_var) = match &block.data().cont {
-            Cont::Ret { target_var, value } => (value.as_slice(), *target_var),
-            Cont::Jump(target, args) => {
-                let tail_call = !self.labeled_blocks.contains_key(target);
-                (args.as_ref(), tail_call.then_some(self.ret_target_var).flatten())
-            }
-            Cont::JumpIf { cond, .. } => (slice::from_ref(cond), None),
+        let exit_args: &[Id] = match &block.data().exit {
+            Exit::Cont(_, value) => value.as_slice(),
+            Exit::Apply(_, args, _) => args.as_ref(),
+            Exit::Branch { cond, .. } => slice::from_ref(cond),
         };
+
+        let exit_target_var = match &block.data().exit {
+            Exit::Cont(Cont::Ret, _) | Exit::Apply(_, _, Cont::Ret) => self.ret_target_var,
+            Exit::Cont(Cont::Stop | Cont::Jump(_), _)
+            | Exit::Apply(_, _, Cont::Stop | Cont::Jump(_))
+            | Exit::Branch { .. } => None,
+        };
+
         let cont_uses = exact_size_chain(
-            cont_args.iter().copied(),
-            cont_target_var,
-        ).map(|id| (InstrIdx::Cont, id, DefUse::Use));
+            exit_args.iter().copied(),
+            exit_target_var,
+        ).map(|id| (InstrIdx::Exit, id, DefUse::Use));
 
         chain(input_defs, prior_def_uses).chain(cont_uses)
     }

@@ -58,51 +58,71 @@ pub fn liveness<P: Procedure>(proc: &P, postorder: &impl NodeOrdering<P::BlockId
 
     let mut liveness: Box<[BlockLiveness<P::VarId>]> = vec![BlockLiveness { vars: HashMap::new(), used_count: 0 }; n].into_boxed_slice();
 
-    for (bpo, block) in postorder.iter().enumerate() {
-        let mut live: BlockLiveness<P::VarId> = BlockLiveness { vars: HashMap::new(), used_count: 0 };
+    loop {
+        let mut changed = false;
 
-        for a in cfg.successors(block) {
-            let apo = postorder.position(a);
-            if apo >= bpo { todo!("liveness in cyclic cfg") }
-            for (&x, info) in &liveness[a.index()].vars {
-                if info.live_in {
-                    live.vars.entry(x).or_insert(VarLiveness {
-                        live_in: true,
-                        live_out: true,
-                        used: false,
-                    });
-                }
+        for block in postorder.iter() {
+            let live = block_liveness(proc, &cfg, block, &liveness);
+            let prev = &liveness[block.index()];
+            if live.used_count != prev.used_count || live.vars != prev.vars {
+                liveness[block.index()] = live;
+                changed = true;
             }
         }
 
-        for (_, x, def_use) in proc.instructions(block).rev() {
-            match live.vars.entry(x) {
-                Entry::Occupied(mut entry) => {
-                    let info = entry.get_mut();
-                    if !info.used {
-                        info.used = true;
-                        live.used_count += 1;
-                    }
-                    if def_use == DefUse::Def {
-                        info.live_in = false;
-                    }
-                }
-
-                Entry::Vacant(entry) => {
-                    live.used_count += 1;
-                    entry.insert(VarLiveness {
-                        live_in: def_use == DefUse::Use,
-                        live_out: false,
-                        used: true,
-                    });
-                }
-            }
+        if !changed {
+            break;
         }
-
-        liveness[block.index()] = live;
     }
 
     liveness
+}
+
+fn block_liveness<P: Procedure>(
+    proc: &P,
+    cfg: &impl Cfg<Node = P::BlockId>,
+    block: P::BlockId,
+    liveness: &[BlockLiveness<P::VarId>],
+) -> BlockLiveness<P::VarId> {
+    let mut live = BlockLiveness { vars: HashMap::new(), used_count: 0 };
+
+    for a in cfg.successors(block) {
+        for (&x, info) in &liveness[a.index()].vars {
+            if info.live_in {
+                live.vars.entry(x).or_insert(VarLiveness {
+                    live_in: true,
+                    live_out: true,
+                    used: false,
+                });
+            }
+        }
+    }
+
+    for (_, x, def_use) in proc.instructions(block).rev() {
+        match live.vars.entry(x) {
+            Entry::Occupied(mut entry) => {
+                let info = entry.get_mut();
+                if !info.used {
+                    info.used = true;
+                    live.used_count += 1;
+                }
+                if def_use == DefUse::Def {
+                    info.live_in = false;
+                }
+            }
+
+            Entry::Vacant(entry) => {
+                live.used_count += 1;
+                entry.insert(VarLiveness {
+                    live_in: def_use == DefUse::Use,
+                    live_out: false,
+                    used: true,
+                });
+            }
+        }
+    }
+
+    live
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -387,6 +407,23 @@ mod tests {
         let result = liveness(&proc, &proc.cfg.postorder());
         assert!(!result[0].live_in("x"));
         assert!(!result[0].live_out("x"));
+    }
+
+    #[test]
+    fn test_liveness_loop() {
+        // 0: def x  →  1: use x  ↺
+        let proc = TestProcedure::new(
+            &[(0, 1), (1, 1)],
+            &[
+                (0, instructions! { def ["x"] }),
+                (1, instructions! { use ["x"] }),
+            ],
+        );
+        let result = liveness(&proc, &proc.cfg.postorder());
+        assert!(!result[0].live_in("x"));
+        assert!(result[0].live_out("x"));
+        assert!(result[1].live_in("x"));
+        assert!(result[1].live_out("x"));
     }
 
     #[test]

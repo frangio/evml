@@ -6,22 +6,28 @@ use smallvec::SmallVec;
 
 use crate::core;
 use crate::compile::{
-    BasicBlockRef, BlockLiveness, BlockPinning, CfgId, Cont, InstrIdx, ProcAnalysis, ProcCfg, analyze
+    BasicBlockRef, BlockLiveness, BlockPinning, CfgId, Cont, InstrIdx, ProcAnalysis, ProcCfg, Exit,
+    analyze,
 };
 use crate::id::Id;
 use crate::analysis::Procedure;
 use crate::graph::{Dfs, EntryNode, Graph, Idx, Predecessors, Successors};
 use crate::stack::Stack;
-use crate::utils::exact_size_chain;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     Pop,
-    PushLabel,
+    PushLabel(RetLabel),
     Swap(usize),
     Dup(usize),
     Rload(usize),
     Rstore(usize),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetLabel {
+    Fresh,
+    Known(Id),
 }
 
 #[derive(Clone, Default)]
@@ -45,7 +51,7 @@ impl BlockPlan {
         })
     }
 
-    pub fn cont_actions(&self) -> impl Iterator<Item = Action> {
+    pub fn exit_actions(&self) -> impl Iterator<Item = Action> {
         let start = self.actions_boundaries.last().copied().unwrap_or(0);
         self.actions[start..].iter().copied()
     }
@@ -168,8 +174,9 @@ fn plan_block(
         bp.actions_boundaries[i] = bp.actions.len();
     }
 
-    plan_cont(
-        &block.data().cont,
+    plan_exit(
+        &block.data().exit,
+        block.proc.ret_target_var(),
         liveness,
         pinning,
         last_use,
@@ -177,14 +184,15 @@ fn plan_block(
     );
 }
 
-fn plan_cont(
-    cont: &Cont,
+fn plan_exit(
+    exit: &Exit,
+    ret_target_var: Option<Id>,
     liveness: &BlockLiveness,
     pinning: &BlockPinning,
     last_use: &HashMap<Id, InstrIdx>,
     bp: &mut BlockPlan,
 ) {
-    let is_live = |x| liveness.live_out(x) || last_use.get(&x) == Some(&InstrIdx::Cont);
+    let is_live = |x| liveness.live_out(x) || last_use.get(&x) == Some(&InstrIdx::Exit);
 
     let topmost_pinned_through = bp.stack.contents()
         .iter()
@@ -227,23 +235,54 @@ fn plan_cont(
         }
     }
 
-    let should_move = |x: Id| !liveness.live_out(x) && last_use[&x] == InstrIdx::Cont;
+    let should_move = |x: Id| !liveness.live_out(x) && last_use[&x] == InstrIdx::Exit;
 
-    match *cont {
-        Cont::Ret { target_var, value } => {
-            if target_var.is_some() && value.is_some() {
+    match exit {
+        Exit::Cont(Cont::Ret, value) => {
+            let target_var = ret_target_var.unwrap();
+            assert_eq!(bp.stack.len(), 1 + value.iter().len());
+            if let Some(value) = value {
+                assert_eq!(bp.stack.read(0), Some(*value));
                 bp.actions.push(Action::Swap(1));
+                bp.stack.swap(1);
+            }
+            assert_eq!(bp.stack.read(0), Some(target_var));
+            bp.stack.popn(1);
+        }
+
+        Exit::Cont(Cont::Stop, value) => {
+            assert_eq!(bp.stack.len(), value.iter().len());
+            if let Some(value) = value {
+                assert_eq!(bp.stack.read(0), Some(*value));
             }
         }
 
-        Cont::Jump(_, ref args) => {
-            plan_args(args, false, should_move, pinning, bp);
-            bp.stack.popn(args.len());
+        Exit::Cont(Cont::Jump(_), arg) => {
+            plan_args(arg.as_slice(), None, should_move, pinning, bp);
+            bp.stack.popn(arg.iter().len());
         }
 
-        Cont::JumpIf { cond, then: _, otherwise: _ } => {
-            let should_move = should_move(cond) && !is_stack_top_pinned(&bp.stack, pinning);
-            plan_var(cond, None, 0, should_move, bp);
+        Exit::Apply(_, args, cont) => {
+            let push_ret_label = match cont {
+                Cont::Ret => None, // Label is already on the stack
+                Cont::Stop => Some(RetLabel::Fresh),
+                Cont::Jump(target) => Some(RetLabel::Known(*target)),
+            };
+
+            plan_args(args, push_ret_label, should_move, pinning, bp);
+
+            if let Cont::Ret = cont {
+                let target_var = ret_target_var.unwrap();
+                assert_eq!(bp.stack.read(args.len()), Some(target_var));
+            }
+
+            assert_eq!(bp.stack.len(), args.len() + 1);
+            bp.stack.popn(args.len() + 1);
+        }
+
+        Exit::Branch { cond, then: _, otherwise: _ } => {
+            let should_move = should_move(*cond) && !is_stack_top_pinned(&bp.stack, pinning);
+            plan_var(*cond, None, 0, should_move, bp);
             bp.stack.popn(1);
         }
     }
@@ -258,6 +297,8 @@ fn plan_expr(
 ) {
     use core::*;
     match expr {
+        Expr::Unit => {}
+
         Expr::Const(_) => {
             bp.stack.push(output);
         }
@@ -268,24 +309,24 @@ fn plan_expr(
         }
 
         Expr::Op(_, args) => {
-            plan_args(args, false, is_last_use, pinning, bp);
+            plan_args(args, None, is_last_use, pinning, bp);
             bp.stack.popn(args.len());
             bp.stack.extend(output.map(Some));
         }
 
         Expr::Apply(_, args) => {
-            plan_args(args, true, is_last_use, pinning, bp);
+            plan_args(args, Some(RetLabel::Fresh), is_last_use, pinning, bp);
             bp.stack.popn(args.len() + 1);
             bp.stack.extend(output.map(Some));
         }
 
-        Expr::Unit | Expr::IfThenElse(..) => panic!(),
+        Expr::Join(..) | Expr::IfThenElse(..) => panic!(),
     }
 }
 
 fn plan_args(
     args: &[Id],
-    has_ret_label: bool,
+    push_ret_label: Option<RetLabel>,
     is_last_use: impl Fn(Id) -> bool,
     pinning: &BlockPinning,
     bp: &mut BlockPlan,
@@ -313,8 +354,8 @@ fn plan_args(
         move_count += should_move as usize;
     }
 
-    if has_ret_label {
-        bp.actions.push(Action::PushLabel);
+    if let Some(ret_label) = push_ret_label {
+        bp.actions.push(Action::PushLabel(ret_label));
         bp.stack.push(None);
         let offset = move_count;
         if offset > 0 {
@@ -386,11 +427,12 @@ fn replan_block_spilled(
             replan_action_spilled(action, &mut new_actions, spill_count, spill_stack);
         }
         let pop_count = match expr {
+            Expr::Unit => 0,
             Expr::Var(_) => 1,
             Expr::Const(_) => 0,
             Expr::Op(_, args) => args.len(),
             Expr::Apply(_, args) => args.len() + 1,
-            Expr::Unit | Expr::IfThenElse(..) => panic!(),
+            Expr::Join(_, _, _) | Expr::IfThenElse(..) => panic!(),
         };
         replan_popn_spilled(pop_count, &mut new_actions, spill_count, spill_stack);
 
@@ -404,13 +446,15 @@ fn replan_block_spilled(
         }
     }
 
-    for action in bp.cont_actions() {
+    for action in bp.exit_actions() {
         replan_action_spilled(action, &mut new_actions, spill_count, spill_stack);
     }
-    let pop_count = match &block.data().cont {
-        Cont::Ret { target_var, value } => exact_size_chain(target_var, value).len(),
-        Cont::Jump(_, args) => args.len(),
-        Cont::JumpIf { .. } => 1,
+    let pop_count = match &block.data().exit {
+        Exit::Cont(Cont::Ret, _) => block.proc.ret_target_var().iter().len(),
+        Exit::Cont(Cont::Stop, _) => 0,
+        Exit::Cont(Cont::Jump(_), value) => value.iter().len(),
+        Exit::Apply(_, args, _) => args.len() + 1,
+        Exit::Branch { .. } => 1,
     };
     replan_popn_spilled(pop_count, &mut new_actions, spill_count, spill_stack);
 
@@ -467,8 +511,8 @@ fn replan_action_spilled(
             }
             spill_stack.popn(1);
         }
-        Action::PushLabel => {
-            actions.push(Action::PushLabel);
+        Action::PushLabel(ret_label) => {
+            actions.push(Action::PushLabel(ret_label));
             spill_stack.push(None);
         }
         Action::Swap(depth) => {

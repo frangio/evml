@@ -38,13 +38,19 @@ pub mod ast {
     }
 
     #[derive(Debug)]
+    pub enum Stmt<T> {
+        Let(Option<T>, Expr<T>),
+        Func(T, Func<T>),
+    }
+
+    #[derive(Debug)]
     pub struct Block<T> {
-        pub priors: Vec<(Option<T>, Expr<T>)>,
+        pub stmts: Vec<Stmt<T>>,
         pub tail: Expr<T>,
     }
 
     #[derive(Debug)]
-    pub struct Proc<T> {
+    pub struct Func<T> {
         pub args: Box<[T]>,
         pub rets: usize,
         pub body: Block<T>,
@@ -52,7 +58,7 @@ pub mod ast {
 
     #[derive(Debug)]
     pub struct Program<T> {
-        pub procs: Vec<(T, Proc<T>)>,
+        pub funcs: Vec<(T, Func<T>)>,
     }
 }
 
@@ -66,6 +72,7 @@ pub mod core {
         Var(Id),
         Op(u8, Box<[Id]>),
         Apply(Id, Box<[Id]>),
+        Join(Option<Id>, usize, Box<Block>),
         IfThenElse(Id, Box<[Block; 2]>),
     }
 
@@ -74,6 +81,7 @@ pub mod core {
         Unit,
         Var(Id),
         Apply(Id, Box<[Id]>),
+        Jump(Id, Option<Id>),
         IfThenElse(Id, Box<[Block; 2]>),
     }
 
@@ -287,10 +295,73 @@ mod tests {
     }
 
     #[test]
+    fn test_e2e_local_func() {
+        assert_e2e_result(U256::from(42), r#"
+            fn main() -> u256 {
+                fn f(x) -> u256 { @mul(x, 2) }
+                f(21)
+            }
+        "#);
+    }
+
+    #[test]
+    fn test_e2e_recursive_local_func() {
+        assert_e2e_result(U256::from(0), r#"
+            fn main() -> u256 {
+                fn f(x) -> u256 {
+                    if x { f(@sub(x, 1)) } else { x }
+                }
+                f(3)
+            }
+        "#);
+    }
+
+    #[test]
+    fn test_e2e_local_func_captures_block_continuation() {
+        assert_e2e_result(U256::from(11), r#"
+            fn main() -> u256 {
+                let y = if 1 {
+                    fn k(x) -> u256 { x }
+                    k(10)
+                } else {
+                    20
+                };
+                @add(y, 1)
+            }
+        "#);
+    }
+
+    #[test]
+    fn test_e2e_local_func_rejects_outer_block_continuation() {
+        assert!(compile_from_source(r#"
+            fn main() -> u256 {
+                fn k(x) -> u256 { x }
+                let y = if 1 {
+                    k(10)
+                } else {
+                    20
+                };
+                @add(y, 1)
+            }
+        "#).is_err());
+    }
+
+    #[test]
     fn test_e2e_if_in_apply() {
         assert_e2e_result(U256::from(10), r#"
             fn main() -> u256 { choose(1) }
             fn choose(x) -> u256 { if x { 10 } else { 20 } }
+        "#);
+    }
+
+    #[test]
+    fn test_e2e_apply_in_if_expr() {
+        assert_e2e_result(U256::from(9), r#"
+            fn main() -> u256 {
+                let x = if 1 { double(4) } else { double(5) };
+                @add(x, 1)
+            }
+            fn double(x) -> u256 { @mul(x, 2) }
         "#);
     }
 
