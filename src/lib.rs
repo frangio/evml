@@ -334,6 +334,122 @@ mod tests {
     }
 
     #[test]
+    fn test_e2e_local_func_captures_live_values_from_branch_calls() {
+        assert_e2e_result(U256::from(44), r#"
+            fn main() -> u256 {
+                let a = 5;
+                let b = 7;
+
+                fn k(x, y) -> u256 {
+                    @add(@add(x, y), @mul(a, b))
+                }
+
+                if 0 {
+                    k(1, 2)
+                } else {
+                    k(3, 6)
+                }
+            }
+        "#);
+    }
+
+    #[test]
+    fn test_e2e_local_func_pins_many_captures_across_join() {
+        assert_e2e_result(U256::from(178), r#"
+            fn main() -> u256 {
+                let a1 = 1;
+                let a2 = 2;
+                let a3 = 3;
+                let a4 = 4;
+                let a5 = 5;
+                let a6 = 6;
+                let a7 = 7;
+                let a8 = 8;
+                let a9 = 9;
+                let a10 = 10;
+                let a11 = 11;
+                let a12 = 12;
+                let a13 = 13;
+                let a14 = 14;
+                let a15 = 15;
+                let a16 = 16;
+                let a17 = 17;
+                let a18 = 18;
+
+                fn k(x, y) -> u256 {
+                    let s1 = @add(a1, a2);
+                    let s2 = @add(a3, a4);
+                    let s3 = @add(a5, a6);
+                    let s4 = @add(a7, a8);
+                    let s5 = @add(a9, a10);
+                    let s6 = @add(a11, a12);
+                    let s7 = @add(a13, a14);
+                    let s8 = @add(a15, a16);
+                    let s9 = @add(a17, a18);
+                    let t1 = @add(s1, s2);
+                    let t2 = @add(s3, s4);
+                    let t3 = @add(s5, s6);
+                    let t4 = @add(s7, s8);
+                    let total = @add(@add(@add(t1, t2), @add(t3, t4)), s9);
+                    @add(@add(x, y), total)
+                }
+
+                if 0 {
+                    k(50, 60)
+                } else {
+                    k(3, 4)
+                }
+            }
+        "#);
+    }
+
+    #[test]
+    fn test_e2e_recursive_local_func_captures_live_values() {
+        assert_e2e_result(U256::from(46), r#"
+            fn main() -> u256 {
+                let step = 2;
+                let scale = 3;
+                let bias = 12;
+
+                fn loop(n, x, y) -> u256 {
+                    if n {
+                        loop(@sub(n, 1), @add(x, step), @mul(y, scale))
+                    } else {
+                        @add(@add(x, y), bias)
+                    }
+                }
+
+                loop(3, 1, 1)
+            }
+        "#);
+    }
+
+    #[test]
+    fn test_e2e_local_func_captures_split_continuation_and_value() {
+        assert_e2e_result(U256::from(40), r#"
+            fn main() -> u256 {
+                let result = if 1 {
+                    let offset = 11;
+
+                    fn k(x, y) -> u256 {
+                        @add(@add(x, y), offset)
+                    }
+
+                    if 0 {
+                        k(1, 2)
+                    } else {
+                        k(4, 5)
+                    }
+                } else {
+                    3
+                };
+
+                @mul(result, 2)
+            }
+        "#);
+    }
+
+    #[test]
     fn test_e2e_local_func_captures_block_continuation() {
         assert_e2e_result(U256::from(11), r#"
             fn main() -> u256 {
